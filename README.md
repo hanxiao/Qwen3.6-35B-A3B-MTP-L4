@@ -104,7 +104,11 @@ gcloud compute firewall-rules create allow-llama-server \
 
 ![ctx-size vs tok/s](qwen36-ctx-benchmark.png)
 
-Max usable ctx-size: **130,560 tokens (127.5K)**. Speed is remarkably flat across the entire range thanks to llama.cpp's auto-fit, which progressively offloads model layers to CPU as ctx-size grows.
+Two strategies compared: **auto-fit** (default, lets llama.cpp offload model layers to CPU as needed) vs **n-gpu-layers 999** (force all model layers on GPU).
+
+### Auto-fit + MTP (recommended)
+
+Max ctx: **130,560 tokens (127.5K)**. llama.cpp progressively offloads MoE expert layers to CPU to make room for KV cache. Since inactive MoE experts are compute-light, speed impact is minimal.
 
 | ctx-size | avg tok/s | status |
 |----------|-----------|--------|
@@ -121,10 +125,35 @@ Max usable ctx-size: **130,560 tokens (127.5K)**. Speed is remarkably flat acros
 | 130,048 | 55.2 | OK |
 | 130,560 | 55.1 | OK (MAX) |
 | 130,688 | -- | OOM |
-| 131,072 | -- | OOM |
+
+### n-gpu-layers 999, no MTP
+
+Forcing all layers on GPU leaves no VRAM for MTP context - MTP OOMs even at ctx 2048. Without MTP, max ctx is **37,888**.
+
+| ctx-size | avg tok/s | status |
+|----------|-----------|--------|
+| 2,048 | 63.4 | OK |
+| 4,096 | 63.4 | OK |
+| 8,192 | 63.4 | OK |
+| 16,384 | 63.1 | OK |
+| 32,768 | 63.1 | OK |
+| 36,864 | 63.5 | OK |
+| 37,888 | 63.4 | OK (MAX) |
+| 38,016 | -- | OOM |
+
+### Comparison
+
+| | Auto-fit + MTP | n-gpu-layers 999 (no MTP) |
+|---|---|---|
+| Max ctx | 130,560 (127.5K) | 37,888 (37K) |
+| tok/s @ 8K | 66.1 | 63.4 |
+| tok/s @ max | 55.1 | 63.4 |
+| Context capacity | 3.4x more | baseline |
+| Speed cost | -16% at max ctx | flat |
+
+Auto-fit is definitively superior: 3.4x more context with only 16% speed drop. MTP adds ~4% speed bonus on top.
 
 Notes:
-- Only ~17% speed drop from 8K to 130K ctx (66.1 -> 55.1 tok/s)
 - VRAM nearly full at every ctx size (~22.3-22.6 / 23.0 GB)
 - 120,832 is an auto-fit anomaly: specific layer boundary causes OOM while 121,856+ works fine
 - OOM boundary is razor-thin: 130,560 works, 130,688 crashes
