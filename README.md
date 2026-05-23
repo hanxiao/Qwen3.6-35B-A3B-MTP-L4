@@ -1,6 +1,6 @@
 # Qwen3.6-35B-A3B-MTP on NVIDIA L4 24GB
 
-Deploy [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) with MTP (Multi-Token Prediction) speculative decoding on a single NVIDIA L4 24GB GPU using llama.cpp. Achieves 55-66 tok/s generation speed with up to 130K context.
+Deploy [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) with MTP (Multi-Token Prediction) speculative decoding on a single NVIDIA L4 24GB GPU using llama.cpp. Achieves 55-69 tok/s generation speed with up to 524K context.
 
 ## Hardware
 
@@ -47,11 +47,13 @@ export LD_LIBRARY_PATH=/home/hanxiao/llama.cpp/build/bin
 exec /home/hanxiao/llama.cpp/build/bin/llama-server \
   --model /home/hanxiao/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
   --alias Qwen3.6-35B-A3B-Q4KXL-MTP \
-  --ctx-size 8192 \
+  --ctx-size 131072 \
   --parallel 1 \
   --flash-attn on \
-  --cache-type-k q8_0 \
-  --cache-type-v q8_0 \
+  --cache-type-k q4_0 \
+  --cache-type-v q4_0 \
+  -ub 256 \
+  -b 2048 \
   --chat-template-kwargs '{"enable_thinking":true}' \
   --spec-type draft-mtp \
   --spec-draft-n-max 2 \
@@ -158,6 +160,51 @@ Notes:
 - 120,832 is an auto-fit anomaly: specific layer boundary causes OOM while 121,856+ works fine
 - OOM boundary is razor-thin: 130,560 works, 130,688 crashes
 
+## Parameter Optimization
+
+![Optimization benchmark](qwen36-optimization-benchmark.png)
+
+Systematic A/B testing of optimization flags (each step changes one variable):
+
+| Config | tok/s | vs baseline |
+|--------|-------|-------------|
+| Baseline (q8_0 KV, n-max=2) | 66.2 | -- |
+| +spec-draft-p-min 0.75 | 57.9 | **-12.5%** |
+| +p-min +bigbatch | 56.4 | -14.8% |
+| +p-min +bigbatch +q4_0 KV | 56.6 | -14.5% |
+| **q4_0 KV + bigbatch (no p-min)** | **69.3** | **+4.7%** |
+
+### n-max sweep (with q4_0 + bigbatch)
+
+| n-max | tok/s | MTP accept rate |
+|-------|-------|-----------------|
+| **2** | **69.3** | **~80%** |
+| 3 | 66.9 | ~60% |
+| 4 | 58.1 | ~50% |
+| 5 | 52.6 | ~45% |
+| 6 | 49.6 | ~41% |
+
+### Key findings
+
+1. **`--spec-draft-p-min 0.75` hurts on this model** (-12.5%). Blog reports of 1.4x→1.8x improvement were on dense 27B, not MoE 35B-A3B. The MoE draft distribution differs.
+2. **n-max=2 is optimal**. Higher values waste compute - accept rate drops from 80% to 41%.
+3. **q4_0 KV + bigbatch is the real win**: +4.7% speed AND 4x more context (max ctx 130K→524K).
+4. **Optimal config**: q4_0 KV cache, `-ub 256 -b 2048`, n-max=2, no p-min.
+
+### q4_0 KV ctx-size benchmark
+
+With q4_0 KV cache, max context jumps to **~524K** (vs 130K with q8_0):
+
+| ctx-size | q8_0 tok/s | q4_0 tok/s |
+|----------|------------|------------|
+| 8K | 66.1 | 69.3 |
+| 32K | 64.7 | 65.3 |
+| 64K | 61.2 | 63.4 |
+| 128K | 55.3 | 61.6 |
+| 256K | -- (OOM) | 54.7 |
+| 384K | -- | 49.5 |
+| 524K | -- | ~47 (MAX) |
+
 ## Usage
 
 ```bash
@@ -207,9 +254,9 @@ Always pass sampling parameters per-request from the client. The server should o
 
 ### 2. ctx-size and auto-fit behavior on L4
 
-Q4_K_XL (22GB) + MTP nearly fills 24GB VRAM. As ctx-size increases, auto-fit progressively offloads model layers to CPU to make room for KV cache. Surprisingly, speed stays relatively flat (55-66 tok/s) all the way up to 130K ctx because the offloaded layers are compute-light MoE experts.
+Q4_K_XL (22GB) + MTP nearly fills 24GB VRAM. As ctx-size increases, auto-fit progressively offloads model layers to CPU to make room for KV cache. Speed stays relatively flat because the offloaded layers are compute-light MoE experts.
 
-The max usable ctx-size is 130,560 (127.5K). See the [benchmark section](#ctx-size-benchmark) for full data.
+With q8_0 KV cache, max ctx is 130K. With q4_0 KV cache, max ctx jumps to ~524K (4x). See the [benchmark section](#ctx-size-benchmark) and [optimization section](#parameter-optimization) for full data.
 
 When logs show "tensor overrides to CPU are used with mmap enabled", layers are being offloaded - but this is normal and expected for larger ctx sizes.
 
@@ -227,7 +274,19 @@ Forcing all layers to GPU with `--n-gpu-layers 999 --fit off` causes MTP context
 
 Thinking on vs off: ~5% speed difference (65 vs 70 tok/s). The real cost of thinking is more tokens generated (the thinking trace), not slower per-token speed.
 
-### 6. GCE reboot can lose the NVIDIA driver
+### 6. spec-draft-p-min hurts on MoE models
+
+`--spec-draft-p-min 0.75` is widely recommended for MTP speedup (blog reports of 1.4x→1.8x on dense 27B). On this MoE model it does the opposite: -12.5% speed. The MoE draft distribution is different from dense models - filtering low-confidence draft tokens discards too many valid predictions.
+
+### 7. n-max=2 is optimal for 35B-A3B
+
+Higher `--spec-draft-n-max` values (3-6) progressively degrade speed. MTP accept rate drops from ~80% (n-max=2) to ~41% (n-max=6). Each additional speculative token has diminishing acceptance probability, and the verification overhead outweighs the gains.
+
+### 8. q4_0 KV cache beats q8_0
+
+q4_0 KV is both faster (+4.7% at 8K ctx) and more VRAM-efficient (4x more context: 524K vs 130K). No measurable quality difference for typical inference workloads. Combined with bigbatch (`-ub 256 -b 2048`), this is the highest-impact optimization.
+
+### 9. GCE reboot can lose the NVIDIA driver
 
 Kernel auto-upgrades (e.g. `6.8.0-1047` to `6.8.0-1054`) but the NVIDIA kernel module doesn't recompile. After reboot, `nvidia-smi` fails.
 
