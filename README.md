@@ -1,6 +1,6 @@
 # Qwen3.6-35B-A3B-MTP on NVIDIA L4 24GB
 
-Deploy [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) with MTP (Multi-Token Prediction) speculative decoding on a single NVIDIA L4 24GB GPU using llama.cpp. Achieves 67-72 tok/s generation speed.
+Deploy [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) with MTP (Multi-Token Prediction) speculative decoding on a single NVIDIA L4 24GB GPU using llama.cpp. Achieves 55-66 tok/s generation speed with up to 130K context.
 
 ## Hardware
 
@@ -100,6 +100,35 @@ gcloud compute firewall-rules create allow-llama-server \
   --project=jinaai-dev --allow=tcp:8080 --target-tags=llama-server
 ```
 
+## ctx-size Benchmark
+
+![ctx-size vs tok/s](qwen36-ctx-benchmark.png)
+
+Max usable ctx-size: **130,560 tokens (127.5K)**. Speed is remarkably flat across the entire range thanks to llama.cpp's auto-fit, which progressively offloads model layers to CPU as ctx-size grows.
+
+| ctx-size | avg tok/s | status |
+|----------|-----------|--------|
+| 8,192 | 66.1 | OK |
+| 16,384 | 63.1 | OK |
+| 32,768 | 64.7 | OK |
+| 49,152 | 63.7 | OK |
+| 65,536 | 61.2 | OK |
+| 98,304 | 59.2 | OK |
+| 106,496 | 60.8 | OK |
+| 114,688 | 58.0 | OK |
+| 122,880 | 55.3 | OK |
+| 126,976 | 60.0 | OK |
+| 130,048 | 55.2 | OK |
+| 130,560 | 55.1 | OK (MAX) |
+| 130,688 | -- | OOM |
+| 131,072 | -- | OOM |
+
+Notes:
+- Only ~17% speed drop from 8K to 130K ctx (66.1 -> 55.1 tok/s)
+- VRAM nearly full at every ctx size (~22.3-22.6 / 23.0 GB)
+- 120,832 is an auto-fit anomaly: specific layer boundary causes OOM while 121,856+ works fine
+- OOM boundary is razor-thin: 130,560 works, 130,688 crashes
+
 ## Usage
 
 ```bash
@@ -147,14 +176,13 @@ Setting `--temp`, `--top-p`, `--top-k`, `--presence-penalty` on the server globa
 
 Always pass sampling parameters per-request from the client. The server should only handle model loading and inference infrastructure.
 
-### 2. ctx-size critically affects speed on L4
+### 2. ctx-size and auto-fit behavior on L4
 
-| ctx-size | Speed | Why |
-|----------|-------|-----|
-| 8192 | 67-72 tok/s | Model fully on GPU |
-| 65536 | 7 tok/s | Auto-fit offloads layers to CPU (11GB host memory) |
+Q4_K_XL (22GB) + MTP nearly fills 24GB VRAM. As ctx-size increases, auto-fit progressively offloads model layers to CPU to make room for KV cache. Surprisingly, speed stays relatively flat (55-66 tok/s) all the way up to 130K ctx because the offloaded layers are compute-light MoE experts.
 
-Q4_K_XL (22GB) + MTP nearly fills 24GB VRAM. Large ctx-size forces KV cache to spill, triggering CPU offload. When logs show "tensor overrides to CPU are used with mmap enabled", layers are on CPU and speed will collapse.
+The max usable ctx-size is 130,560 (127.5K). See the [benchmark section](#ctx-size-benchmark) for full data.
+
+When logs show "tensor overrides to CPU are used with mmap enabled", layers are being offloaded - but this is normal and expected for larger ctx sizes.
 
 ### 3. Do not use Docker
 
