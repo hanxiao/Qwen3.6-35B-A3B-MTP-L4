@@ -195,8 +195,9 @@ gcloud compute instances stop qwen36-mtp-l4 --project=jinaai-dev --zone=us-west1
 4. **n-max = 2 is optimal**; higher values drop MTP acceptance faster than they add tokens.
 5. **f16 KV keeps CUDA graphs on** (~+3 %) and is higher fidelity than quantized KV. Quantized KV is for *context capacity*, not speed.
 6. **Never set sampling parameters server-side.** Global `--temp`/`--top-p`/etc. perturb the draft distribution and tank MTP acceptance; pass sampling per-request.
-7. **The L4 is the ceiling.** ~78–90 tok/s is the honest decode limit for Q4_K_XL + MTP on a single, 72 W, 300 GB/s L4. 100 tok/s needs more bandwidth or a lower quant.
-8. **GCE reboots can drop the NVIDIA driver** (kernel auto-upgrades, prebuilt module lags). Fix: `sudo apt-get install -y nvidia-dkms-570-server-open && sudo modprobe nvidia` (DKMS rebuilds for the new kernel).
+7. **The L4 is the ceiling.** ~78–90 tok/s is the honest decode limit for Q4_K_XL + MTP on a single, 72 W, 300 GB/s L4. 100 tok/s needs a faster GPU — a lower quant doesn't get there either (measured Q3_K_XL peaks at ~98).
+8. **`GGML_CUDA_GRAPH_OPT=1` doesn't help here** (it slightly *hurts*: −1 to −1.5%). It's a lossless CUDA-graph stream-reorder that gives ~40% on RTX 4090/5090, but the gain scales with memory bandwidth the L4 lacks, so the scheduling overhead isn't repaid. It was the only untried lossless lever surviving an exhaustive search (GitHub issues/PRs, source, community benchmarks, arxiv, alt engines, hardware) — confirming no flag/build/runtime change crosses 100 losslessly on this card.
+9. **GCE reboots can drop the NVIDIA driver** (kernel auto-upgrades, prebuilt module lags). Fix: `sudo apt-get install -y nvidia-dkms-570-server-open && sudo modprobe nvidia` (DKMS rebuilds for the new kernel).
 
 ## Cost
 
