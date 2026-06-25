@@ -145,8 +145,9 @@ This was the target; it is not achievable on a single L4 without changing the mo
 2. **MTP multiplies that by only ~1.27–1.37×.** Acceptance is 0.74 on prose (1.27× → 81) and tops out at ~0.86 on JSON (1.37× → 90). Reaching 100 would need a sustained ~1.53× (accept ≈0.92+), which the MTP head does not deliver on any workload tested.
 3. **The L4 is power-capped.** During decode: `power.draw = 72.03 W = power.limit = power.max_limit`, SM clock throttled to **1605 MHz vs 2040 MHz max**, 95 % util. The card is already flat-out; its max power limit *is* 72 W, so it cannot be raised.
 4. **Cross-check:** Unsloth reports ~240 tok/s for this model on an RTX 6000 (Ada, ~960 GB/s). Scaling by bandwidth → 240 × (300/960) ≈ 75 tok/s expected on L4 — consistent with what we measure.
+5. **A lower quant barely helps — the L4 is compute/power-bound, not bandwidth-bound.** Measured Q3_K_XL (16.03 GiB, 25 % smaller than Q4): raw tg128 = **70.8** tok/s (only +8 % over Q4's 65.5, *not* the +33 % pure-bandwidth scaling would predict), and with MTP **93 (prose) / 94 (code) / 98 (JSON)** — **still under 100**. So even dropping to Q3 doesn't clear 100 on the L4, and it isn't worth the quality loss.
 
-**What would reach >100 tok/s:** a higher-bandwidth GPU (L40S ~864 GB/s, RTX 6000 Ada ~960 GB/s, A100 ~2 TB/s), or a lower-bit-rate quant (e.g. MXFP4_MOE) — both outside this deployment's constraints (single L4, Q4_K_XL).
+**What actually reaches >100 tok/s:** a higher-power / higher-bandwidth GPU — L40S (~864 GB/s), RTX 6000 Ada (~960 GB/s → ~240), or A100 (~2 TB/s). **Not** a quant change: MXFP4 has no FP4 hardware path on Ada/L4 (Blackwell-only), and Q3_K_XL tops out at ~98. The single L4's 72 W ceiling is the wall.
 
 ---
 
