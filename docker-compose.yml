@@ -1,0 +1,30 @@
+# Qwen3.6-35B-A3B-MTP on a single NVIDIA L4 24GB — decode-optimized.
+# Start:  sudo docker compose up -d
+# Model:  ~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf  (see README step 1)
+services:
+  llama-server:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: llama-server
+    ports:
+      - "8080:8080"
+    volumes:
+      - ${HOME}/models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    command: >
+      --model /models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+      --alias Qwen3.6-35B-A3B-Q4KXL-MTP
+      --host 0.0.0.0 --port 8080
+      --jinja --tools all
+      --ctx-size 8192 --parallel 1
+      --flash-attn on
+      -ngl 99 --n-cpu-moe 0
+      -ub 64 -b 512
+      --no-mmap --threads 8
+      --spec-type draft-mtp --spec-draft-n-max 2

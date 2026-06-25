@@ -1,303 +1,201 @@
 # Qwen3.6-35B-A3B-MTP on NVIDIA L4 24GB
 
-Deploy [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) with MTP (Multi-Token Prediction) speculative decoding on a single NVIDIA L4 24GB GPU using llama.cpp. Achieves 55-69 tok/s generation speed with up to 524K context.
+Deploy [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (Unsloth **Q4_K_XL** GGUF) with MTP (Multi-Token Prediction) speculative decoding on a **single NVIDIA L4 24 GB** GPU, using the **official llama.cpp Docker image**.
+
+Decode throughput, measured honestly (greedy, prompt cache disabled, fresh generation each request):
+
+| Workload | Decode tok/s |
+|----------|-------------|
+| Free-form prose | **~78–81** |
+| Code generation | **~87** |
+| JSON / structured output | **~88–90** |
+
+This is a **+28–42 % speedup over the out-of-the-box config (63 tok/s)**, achieved purely by configuration — same model, same Q4_K_XL quant, no quality loss. The single biggest win is forcing **all MoE experts onto the GPU** (see [How the speedup works](#how-the-speedup-works)).
+
+> **On the 100 tok/s target:** it is **not reachable on a single L4** with this model+quant. The raw decode ceiling (no speculation) is **65.5 tok/s**, and MTP multiplies it by at most ~1.37× on the most favorable workload → ~90 tok/s. The L4 runs **power-capped at its 72 W TDP** during decode. See [Why not 100 tok/s](#why-not-100-toks) for the full analysis and what hardware/quant *would* get there.
+
+---
 
 ## Hardware
 
-- GPU: NVIDIA L4 24GB (GCE `g2-standard-8` or similar)
-- OS: Ubuntu 22.04 (Deep Learning VM, `common-cu129` image family)
-- The `common-cu129` image comes with NVIDIA driver + CUDA pre-installed
+- GPU: **NVIDIA L4 24 GB** (GCE `g2-standard-8`), ~300 GB/s memory bandwidth, 72 W TDP
+- OS: Ubuntu 22.04 Deep Learning VM (`common-cu129` image family — ships NVIDIA driver + CUDA + Docker + nvidia-container-toolkit)
+- Instance: `qwen36-mtp-l4`, project `jinaai-dev`, zone `us-west1-a`
 
 ## Model
 
-- Quantization: [Unsloth Q4_K_XL GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) (~22GB)
-- MTP layers are baked into the same GGUF file
-- This is an MoE model (35B total, 3B active), so Q4_K_XL fits in 24GB VRAM
+- [unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF), file `Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf` (~22 GiB, loads to **21.27 GiB** on GPU)
+- MoE: 35 B total, 3 B active. The MTP draft head is **baked into the same GGUF** — use the `-MTP-` repo, not the plain GGUF repo.
+- At Q4_K_XL the model nearly fills the 24 GB card, which is the whole optimization story below.
 
-## Setup
+---
 
-### 1. Build llama.cpp from source
+## Quick start (Docker — recommended)
 
-Do NOT use Docker. The official `ghcr.io/ggml-org/llama.cpp:server-cuda` image has `libllama-common.so.0` missing issues as of 2026-05. Building from source is faster, more stable, and easier to debug.
+No source build required. The official `ghcr.io/ggml-org/llama.cpp:server-cuda` image runs MTP out of the box (verified build `9787`, 2026-06).
 
-```bash
-sudo apt-get update && sudo apt-get install -y build-essential cmake
-git clone https://github.com/ggml-org/llama.cpp.git
-cd llama.cpp
-cmake -B build -DGGML_CUDA=ON
-cmake --build build -j4 --target llama-server
-```
-
-### 2. Download the model
+### 1. Download the model
 
 ```bash
 mkdir -p ~/models
-pip install huggingface_hub
-huggingface-cli download unsloth/Qwen3.6-35B-A3B-MTP-GGUF \
+pip install -q -U "huggingface_hub[hf_xet]"
+~/.local/bin/hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF \
   Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
   --local-dir ~/models/Qwen3.6-35B-A3B-MTP-GGUF
 ```
 
-### 3. Create the start script
+### 2. Start the server (optimized config)
 
 ```bash
-cat > ~/start-llama.sh << 'EOF'
-#!/bin/bash
-export LD_LIBRARY_PATH=/home/hanxiao/llama.cpp/build/bin
-exec /home/hanxiao/llama.cpp/build/bin/llama-server \
-  --model /home/hanxiao/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+sudo docker run -d --name llama-server --restart unless-stopped \
+  --gpus all -p 8080:8080 \
+  -v ~/models:/models \
+  ghcr.io/ggml-org/llama.cpp:server-cuda \
+  --model /models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
   --alias Qwen3.6-35B-A3B-Q4KXL-MTP \
-  --ctx-size 131072 \
-  --parallel 1 \
+  --host 0.0.0.0 --port 8080 --jinja --tools all \
+  --ctx-size 8192 --parallel 1 \
   --flash-attn on \
-  --cache-type-k q4_0 \
-  --cache-type-v q4_0 \
-  -ub 256 \
-  -b 2048 \
-  --chat-template-kwargs '{"enable_thinking":true}' \
-  --spec-type draft-mtp \
-  --spec-draft-n-max 2 \
-  --jinja \
-  --tools all \
-  --host 0.0.0.0 \
-  --port 8080
-EOF
-chmod +x ~/start-llama.sh
+  -ngl 99 --n-cpu-moe 0 \
+  -ub 64 -b 512 \
+  --no-mmap --threads 8 \
+  --spec-type draft-mtp --spec-draft-n-max 2
 ```
 
-### 4. Set up systemd
+Or use [`docker-compose.yml`](docker-compose.yml): `sudo docker compose up -d`.
+
+### 3. Test
 
 ```bash
-sudo tee /etc/systemd/system/llama-server.service << 'EOF'
-[Unit]
-Description=llama.cpp server - Qwen3.6 MTP
-After=network.target
-
-[Service]
-Type=simple
-User=hanxiao
-ExecStart=/home/hanxiao/start-llama.sh
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable llama-server
-sudo systemctl start llama-server
+curl -s http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"hello"}],"max_tokens":64}'
 ```
 
-### 5. Expose port 80 (optional)
+---
 
-```bash
-# iptables redirect 80 -> 8080
-sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080
+## The optimized parameters (and why)
 
-# GCE firewall
-gcloud compute firewall-rules create allow-llama-http \
-  --project=jinaai-dev --allow=tcp:80 --target-tags=llama-server
-gcloud compute firewall-rules create allow-llama-server \
-  --project=jinaai-dev --allow=tcp:8080 --target-tags=llama-server
-```
+| Flag | Value | Why |
+|------|-------|-----|
+| `-ngl 99 --n-cpu-moe 0` | all layers + **all experts on GPU** | the #1 lever (+28 %). See below. |
+| `-ub 64 -b 512` | tiny micro-batch | shrinks the compute buffer by ~1 GB, freeing exactly enough VRAM for `--n-cpu-moe 0` to fit. Decode is batch-1, so this costs nothing at generation time. |
+| `--ctx-size 8192` | 8 K | small KV so the full model fits on-GPU. Larger context forces experts back to CPU (see [trade-offs](#context-vs-speed-trade-off)). |
+| `--flash-attn on` | — | required; default f16 KV cache (keeps CUDA graphs enabled). |
+| `--spec-type draft-mtp --spec-draft-n-max 2` | MTP, 2 drafts | n-max=2 is optimal across workloads (higher values drop accept rate faster than they add tokens). |
+| `--no-mmap` | — | loads weights resident in RAM/VRAM instead of mmap (no paging). |
 
-## ctx-size Benchmark
+### How the speedup works
 
-![ctx-size vs tok/s](qwen36-ctx-benchmark.png)
+The Q4_K_XL weights are 21.27 GiB on a 22.5 GiB-usable card. By default llama.cpp **auto-fit** leaves several MoE expert layers on the CPU to be safe — and every token that routes to a CPU-resident expert pays a large penalty. That caps decode at **63 tok/s**.
 
-Two strategies compared: **auto-fit** (default, lets llama.cpp offload model layers to CPU as needed) vs **n-gpu-layers 999** (force all model layers on GPU).
+The fix: explicitly place **everything on the GPU** (`-ngl 99 --n-cpu-moe 0`) and claw back the VRAM needed to make it fit by **shrinking the compute buffer** (`-ub 64`, since decoding only ever uses batch 1). With zero experts on the CPU, decode jumps to **~81 tok/s (prose)**.
 
-### Auto-fit + MTP (recommended)
+`--n-cpu-moe` sweep (fewer experts on CPU → faster), `-ub 64`, ctx 8192, f16 KV, MTP n-max 2:
 
-Max ctx: **130,560 tokens (127.5K)**. llama.cpp progressively offloads MoE expert layers to CPU to make room for KV cache. Since inactive MoE experts are compute-light, speed impact is minimal.
+| `--n-cpu-moe` | decode tok/s | VRAM |
+|---------------|-------------|------|
+| auto-fit (default) | 63.3 | 21504 MiB |
+| 6 | 63.8 | 19564 MiB |
+| 4 | 67.3 | 20404 MiB |
+| 2 | 73.5 | 21158 MiB |
+| 1 | 76.9 | 21624 MiB |
+| **0 (all on GPU)** | **80.9** | 21918 MiB |
 
-| ctx-size | avg tok/s | status |
-|----------|-----------|--------|
-| 8,192 | 66.1 | OK |
-| 16,384 | 63.1 | OK |
-| 32,768 | 64.7 | OK |
-| 49,152 | 63.7 | OK |
-| 65,536 | 61.2 | OK |
-| 98,304 | 59.2 | OK |
-| 106,496 | 60.8 | OK |
-| 114,688 | 58.0 | OK |
-| 122,880 | 55.3 | OK |
-| 126,976 | 60.0 | OK |
-| 130,048 | 55.2 | OK |
-| 130,560 | 55.1 | OK (MAX) |
-| 130,688 | -- | OOM |
+---
 
-### n-gpu-layers 999, no MTP
+## Benchmark methodology
 
-Forcing all layers on GPU leaves no VRAM for MTP context - MTP OOMs even at ctx 2048. Without MTP, max ctx is **37,888**.
+Reproducible, no caching tricks:
 
-| ctx-size | avg tok/s | status |
-|----------|-----------|--------|
-| 2,048 | 63.4 | OK |
-| 4,096 | 63.4 | OK |
-| 8,192 | 63.4 | OK |
-| 16,384 | 63.1 | OK |
-| 32,768 | 63.1 | OK |
-| 36,864 | 63.5 | OK |
-| 37,888 | 63.4 | OK (MAX) |
-| 38,016 | -- | OOM |
+- **Decode-only metric:** `timings.predicted_per_second` from llama.cpp (excludes prompt processing).
+- **No input/output cache:** every request sends `"cache_prompt": false` with distinct prompts — no prefix reuse, no replayed outputs.
+- **Greedy** (`temperature: 0`) for stable, reproducible MTP acceptance.
+- 256–384 generated tokens per request, averaged over multiple distinct prompts per workload.
 
-### Comparison
+Scripts used to produce every number here are in [`scripts/`](scripts/) (`bench.sh`).
 
-| | Auto-fit + MTP | n-gpu-layers 999 (no MTP) |
-|---|---|---|
-| Max ctx | 130,560 (127.5K) | 37,888 (37K) |
-| tok/s @ 8K | 66.1 | 63.4 |
-| tok/s @ max | 55.1 | 63.4 |
-| Context capacity | 3.4x more | baseline |
-| Speed cost | -16% at max ctx | flat |
+### MTP n-max sweep (full GPU residency, prose)
 
-Auto-fit is definitively superior: 3.4x more context with only 16% speed drop. MTP adds ~4% speed bonus on top.
+| n-max | tok/s | MTP accept |
+|-------|-------|-----------|
+| 1 | 75.1 | 0.85 |
+| **2** | **80.5** | 0.74 |
+| 3 | 79.1 | 0.63 |
+| 4 | 77.1 | 0.57 |
+| 5 | 72.3 | 0.50 |
+| 6 | 69.7 | 0.44 |
 
-Notes:
-- VRAM nearly full at every ctx size (~22.3-22.6 / 23.0 GB)
-- 120,832 is an auto-fit anomaly: specific layer boundary causes OOM while 121,856+ works fine
-- OOM boundary is razor-thin: 130,560 works, 130,688 crashes
+### Decode by workload (n-max 2, full GPU residency)
 
-## Parameter Optimization
+| Workload | tok/s | MTP accept |
+|----------|-------|-----------|
+| Prose | 77.9 | 0.70 |
+| Repetitive/list | 86.1 | 0.83 |
+| Code | 87.1 | 0.84 |
+| JSON/structured | 88.0 | 0.86 |
 
-![Optimization benchmark](qwen36-optimization-benchmark.png)
+---
 
-Systematic A/B testing of optimization flags (each step changes one variable):
+## Why not 100 tok/s
 
-| Config | tok/s | vs baseline |
-|--------|-------|-------------|
-| Baseline (q8_0 KV, n-max=2) | 66.2 | -- |
-| +spec-draft-p-min 0.75 | 57.9 | **-12.5%** |
-| +p-min +bigbatch | 56.4 | -14.8% |
-| +p-min +bigbatch +q4_0 KV | 56.6 | -14.5% |
-| **q4_0 KV + bigbatch (no p-min)** | **69.3** | **+4.7%** |
+This was the target; it is not achievable on a single L4 without changing the model, quant, or GPU. The evidence:
 
-### n-max sweep (with q4_0 + bigbatch)
+1. **Raw decode ceiling = 65.5 tok/s.** `llama-bench` with no speculation, full GPU residency (`-ngl 99 --n-cpu-moe 0`), measures `tg128 = 65.50 ± 0.19 tok/s`. This is the hard memory-bandwidth limit for reading the model's active weights at ~300 GB/s.
+2. **MTP multiplies that by only ~1.27–1.37×.** Acceptance is 0.74 on prose (1.27× → 81) and tops out at ~0.86 on JSON (1.37× → 90). Reaching 100 would need a sustained ~1.53× (accept ≈0.92+), which the MTP head does not deliver on any workload tested.
+3. **The L4 is power-capped.** During decode: `power.draw = 72.03 W = power.limit = power.max_limit`, SM clock throttled to **1605 MHz vs 2040 MHz max**, 95 % util. The card is already flat-out; its max power limit *is* 72 W, so it cannot be raised.
+4. **Cross-check:** Unsloth reports ~240 tok/s for this model on an RTX 6000 (Ada, ~960 GB/s). Scaling by bandwidth → 240 × (300/960) ≈ 75 tok/s expected on L4 — consistent with what we measure.
 
-| n-max | tok/s | MTP accept rate |
-|-------|-------|-----------------|
-| **2** | **69.3** | **~80%** |
-| 3 | 66.9 | ~60% |
-| 4 | 58.1 | ~50% |
-| 5 | 52.6 | ~45% |
-| 6 | 49.6 | ~41% |
+**What would reach >100 tok/s:** a higher-bandwidth GPU (L40S ~864 GB/s, RTX 6000 Ada ~960 GB/s, A100 ~2 TB/s), or a lower-bit-rate quant (e.g. MXFP4_MOE) — both outside this deployment's constraints (single L4, Q4_K_XL).
 
-### Key findings
+---
 
-1. **`--spec-draft-p-min 0.75` hurts on this model** (-12.5%). Blog reports of 1.4x→1.8x improvement were on dense 27B, not MoE 35B-A3B. The MoE draft distribution differs.
-2. **n-max=2 is optimal**. Higher values waste compute - accept rate drops from 80% to 41%.
-3. **q4_0 KV + bigbatch is the real win**: +4.7% speed AND 4x more context (max ctx 130K→524K).
-4. **Optimal config**: q4_0 KV cache, `-ub 256 -b 2048`, n-max=2, no p-min.
+## Quality: no regression
 
-### q4_0 KV ctx-size benchmark
+- **MTP is distribution-preserving.** A speculative token is accepted only when it matches the target model's own next-token distribution, so MTP changes *speed*, not *what the model produces*. (Greedy output can differ token-for-token from non-speculative decoding because of floating-point differences in how logits are batched during draft verification — but both are equally coherent. Deterministic probes match exactly: `17×23 → 391`, capital of Australia → `Canberra`, reverse "model" → `ledom`.)
+- **The speedup touches no quality knob.** Same Q4_K_XL weights, **default f16 KV cache** (higher fidelity than a quantized KV cache), sampling passed per-request. Nothing is traded away for speed — if anything, f16 KV is higher fidelity than the quantized-KV configs used for long-context.
 
-With q4_0 KV cache, max context jumps to **~524K** (vs 130K with q8_0):
+---
 
-| ctx-size | q8_0 tok/s | q4_0 tok/s |
-|----------|------------|------------|
-| 8K | 66.1 | 69.3 |
-| 32K | 64.7 | 65.3 |
-| 64K | 61.2 | 63.4 |
-| 128K | 55.3 | 61.6 |
-| 256K | -- (OOM) | 54.7 |
-| 384K | -- | 49.5 |
-| 524K | -- | ~47 (MAX) |
+## Context vs speed trade-off
 
-## Usage
+The optimized config is tuned for **decode speed at ≤8 K context**. If you need long context instead:
 
-```bash
-curl http://<IP>:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [{"role": "user", "content": "hello"}],
-    "max_tokens": 100
-  }'
-```
+- Raise `--ctx-size` and accept expert offload (`--n-cpu-moe` > 0), trading speed back toward the 63 tok/s baseline.
+- For very long context, a quantized KV cache (`--cache-type-k q4_0 --cache-type-v q4_0`) extends maximum context substantially at a further speed cost. This is a different optimization target than this repo's headline (max decode tok/s).
+
+---
 
 ## Operations
 
 ```bash
-# Status
-sudo systemctl status llama-server
+# logs / status
+sudo docker logs -f llama-server
+sudo docker ps
 
-# Restart
-sudo systemctl restart llama-server
+# restart
+sudo docker restart llama-server
 
-# Logs
-sudo journalctl -u llama-server -f
-
-# Speed check
-curl -s http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"hello"}],"max_tokens":100}' \
+# decode speed check (greedy, no cache)
+curl -s http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Write a Python LRU cache."}],"max_tokens":256,"temperature":0,"cache_prompt":false}' \
   | python3 -c "import sys,json;t=json.load(sys.stdin)['timings'];print(f\"{t['predicted_per_second']:.1f} tok/s\")"
 
-# Update llama.cpp
-cd ~/llama.cpp && git pull
-cmake -B build -DGGML_CUDA=ON
-cmake --build build -j4 --target llama-server
-sudo systemctl restart llama-server
-
-# Shut down to save cost
-gcloud compute instances stop qwen36-mtp-l4 --project=jinaai-dev --zone=us-east1-b
+# stop the instance to save cost (correct zone: us-west1-a)
+gcloud compute instances stop qwen36-mtp-l4 --project=jinaai-dev --zone=us-west1-a
 ```
 
-## Lessons Learned
+## Lessons learned
 
-### 1. Never set sampling parameters on the server side
-
-Setting `--temp`, `--top-p`, `--top-k`, `--presence-penalty` on the server globally tanks MTP acceptance rate from 85%+ down to 60%+, dropping speed from 70 to 35 tok/s. Sampling parameters alter the probability distribution, causing MTP draft predictions to be rejected at high rates.
-
-Always pass sampling parameters per-request from the client. The server should only handle model loading and inference infrastructure.
-
-### 2. ctx-size and auto-fit behavior on L4
-
-Q4_K_XL (22GB) + MTP nearly fills 24GB VRAM. As ctx-size increases, auto-fit progressively offloads model layers to CPU to make room for KV cache. Speed stays relatively flat because the offloaded layers are compute-light MoE experts.
-
-With q8_0 KV cache, max ctx is 130K. With q4_0 KV cache, max ctx jumps to ~524K (4x). See the [benchmark section](#ctx-size-benchmark) and [optimization section](#parameter-optimization) for full data.
-
-When logs show "tensor overrides to CPU are used with mmap enabled", layers are being offloaded - but this is normal and expected for larger ctx sizes.
-
-### 3. Do not use Docker
-
-- `ghcr.io/ggml-org/llama.cpp:server-cuda` has `libllama-common.so.0` missing issues (2026-05)
-- Mirror images need `LD_LIBRARY_PATH=/app` hacks
-- Locally compiled llama-server is faster, more stable, and easier to debug
-
-### 4. --n-gpu-layers 999 + MTP = OOM
-
-Forcing all layers to GPU with `--n-gpu-layers 999 --fit off` causes MTP context allocation to OOM on L4, even with ctx-size 8192 and q4_0 KV cache. Let auto-fit handle the allocation.
-
-### 5. Thinking mode barely affects tok/s
-
-Thinking on vs off: ~5% speed difference (65 vs 70 tok/s). The real cost of thinking is more tokens generated (the thinking trace), not slower per-token speed.
-
-### 6. spec-draft-p-min hurts on MoE models
-
-`--spec-draft-p-min 0.75` is widely recommended for MTP speedup (blog reports of 1.4x→1.8x on dense 27B). On this MoE model it does the opposite: -12.5% speed. The MoE draft distribution is different from dense models - filtering low-confidence draft tokens discards too many valid predictions.
-
-### 7. n-max=2 is optimal for 35B-A3B
-
-Higher `--spec-draft-n-max` values (3-6) progressively degrade speed. MTP accept rate drops from ~80% (n-max=2) to ~41% (n-max=6). Each additional speculative token has diminishing acceptance probability, and the verification overhead outweighs the gains.
-
-### 8. q4_0 KV cache beats q8_0
-
-q4_0 KV is both faster (+4.7% at 8K ctx) and more VRAM-efficient (4x more context: 524K vs 130K). No measurable quality difference for typical inference workloads. Combined with bigbatch (`-ub 256 -b 2048`), this is the highest-impact optimization.
-
-### 9. GCE reboot can lose the NVIDIA driver
-
-Kernel auto-upgrades (e.g. `6.8.0-1047` to `6.8.0-1054`) but the NVIDIA kernel module doesn't recompile. After reboot, `nvidia-smi` fails.
-
-Fix: install DKMS once, it auto-compiles for new kernels.
-
-```bash
-sudo apt-get install -y nvidia-dkms-570-server-open
-sudo modprobe nvidia
-```
+1. **Docker works — use it.** The official `ghcr.io/ggml-org/llama.cpp:server-cuda` image runs MTP with `--gpus all` out of the box (no `libllama-common.so.0` issue as of build 9787 / 2026-06). There is **no prebuilt Linux CUDA binary** from llama.cpp (Windows only), so Docker is the prebuilt path; build from source only if you need a flag the image lacks.
+2. **Full GPU residency beats auto-fit.** Auto-fit conservatively offloads MoE experts to CPU. `-ngl 99 --n-cpu-moe 0` + a small `-ub` to free the compute buffer is +28 %.
+3. **Tiny `-ub` is free at decode time.** Decoding is batch-1, so `-ub 64` doesn't slow generation; it only shrinks the compute buffer (and slows prompt *processing*, which doesn't affect the decode metric).
+4. **n-max = 2 is optimal**; higher values drop MTP acceptance faster than they add tokens.
+5. **f16 KV keeps CUDA graphs on** (~+3 %) and is higher fidelity than quantized KV. Quantized KV is for *context capacity*, not speed.
+6. **Never set sampling parameters server-side.** Global `--temp`/`--top-p`/etc. perturb the draft distribution and tank MTP acceptance; pass sampling per-request.
+7. **The L4 is the ceiling.** ~78–90 tok/s is the honest decode limit for Q4_K_XL + MTP on a single, 72 W, 300 GB/s L4. 100 tok/s needs more bandwidth or a lower quant.
+8. **GCE reboots can drop the NVIDIA driver** (kernel auto-upgrades, prebuilt module lags). Fix: `sudo apt-get install -y nvidia-dkms-570-server-open && sudo modprobe nvidia` (DKMS rebuilds for the new kernel).
 
 ## Cost
 
-- L4 on-demand: ~$0.81/hr (~$584/month)
-- Spot (preemptible): ~$0.24/hr (~$173/month) - not recommended for always-on serving
+- L4 on-demand: ~$0.81/hr (~$584/mo). Spot: ~$0.24/hr. Stop the instance when idle.
