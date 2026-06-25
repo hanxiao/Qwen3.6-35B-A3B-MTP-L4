@@ -8,7 +8,9 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ${HOME}/models:/models
+      # absolute path: `sudo docker compose` runs with HOME=/root, so ${HOME} won't work.
+      # adjust this to wherever you downloaded the model (README step 1).
+      - /home/hanxiao/models:/models
     deploy:
       resources:
         reservations:
