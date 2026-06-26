@@ -44,7 +44,17 @@ pip install -q -U "huggingface_hub[hf_xet]"
   --local-dir ~/models/Qwen3.6-35B-A3B-MTP-GGUF
 ```
 
-### 2. Start the server (optimized config)
+### 2. Start the server
+
+**Easiest — prebuilt image** (the optimized config below is baked in as the default command):
+
+```bash
+sudo docker run -d --name llama-server --restart unless-stopped \
+  --gpus all -p 8080:8080 -v ~/models:/models \
+  ghcr.io/hanxiao/qwen3.6-35b-a3b-mtp-l4:latest
+```
+
+<details><summary>Or run the official image with the flags explicitly (same result)</summary>
 
 ```bash
 sudo docker run -d --name llama-server --restart unless-stopped \
@@ -62,7 +72,9 @@ sudo docker run -d --name llama-server --restart unless-stopped \
   --spec-type draft-mtp --spec-draft-n-max 2
 ```
 
-Or use [`docker-compose.yml`](docker-compose.yml): `sudo docker compose up -d`.
+</details>
+
+Or use [`docker-compose.yml`](docker-compose.yml): `sudo docker compose up -d`. The prebuilt image is published from [`Dockerfile`](Dockerfile) by [a GitHub Action](.github/workflows/docker-publish.yml).
 
 ### 3. Test
 
