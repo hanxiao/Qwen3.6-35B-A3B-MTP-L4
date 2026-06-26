@@ -186,6 +186,12 @@ This was the target; it is not achievable on a single L4 without changing the mo
 - **MTP is distribution-preserving.** A speculative token is accepted only when it matches the target model's own next-token distribution, so MTP changes *speed*, not *what the model produces*. (Greedy output can differ token-for-token from non-speculative decoding because of floating-point differences in how logits are batched during draft verification — but both are equally coherent. Deterministic probes match exactly: `17×23 → 391`, capital of Australia → `Canberra`, reverse "model" → `ledom`.)
 - **The speedup touches no quality knob.** Same Q4_K_XL weights, **default f16 KV cache** (higher fidelity than a quantized KV cache), sampling passed per-request. Nothing is traded away for speed — if anything, f16 KV is higher fidelity than the quantized-KV configs used for long-context.
 
+## Advanced: MoE verify-fusion patch (optional, +~1%)
+
+[`patches/moe-verify-fusion.patch`](patches/moe-verify-fusion.patch) is an experimental, **lossless** llama.cpp/ggml-cuda patch that fuses the gate+up projections (and the SwiGLU) of the MoE FFN on the **MTP verify path** (`MUL_MAT_ID` with `ncols_dst > 1`), which upstream currently runs unfused. The single-token path is already fused upstream; this extends it to the speculative-verify step.
+
+Measured (same source build, ECC-off, A/B): **+1.0–1.1 %** (e.g. chat 82.8 → 83.6 tok/s), output bit-equivalent (factual probes exact). It's a genuine but small win — bounded by the per-token launch-overhead budget (~3 %, measured via CUDA graphs on/off), which is why it can't close the gap to 100. Requires a source build (`cmake --build`), so it forks the clean Docker path; it's upstreamable. Apply with `patch -p1 < patches/moe-verify-fusion.patch`.
+
 ---
 
 ## Context vs speed trade-off
