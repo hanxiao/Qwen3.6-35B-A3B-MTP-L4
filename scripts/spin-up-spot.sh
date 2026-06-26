@@ -3,17 +3,26 @@
 # llama.cpp Web UI + Prometheus telemetry, and block until it's ready.
 #
 # Uses your active gcloud project + auth (gcloud config / CLOUDSDK_CORE_PROJECT).
-# Override via env: ZONES, INSTANCE, MACHINE.
+# Zones are enumerated live from the GCP API (every zone that offers the VM),
+# US first so the Web UI stays low-latency. Override any of these via env:
+#   ZONES="zone-a zone-b ..."   INSTANCE=name   MACHINE=g2-standard-8
 set -euo pipefail
 
-ZONES="${ZONES:-us-west1-a us-central1-a us-east1-d europe-west4-a}"
 INSTANCE="${INSTANCE:-qwen36-mtp-l4-spot}"
 MACHINE="${MACHINE:-g2-standard-8}"
 
+# Every zone that offers $MACHINE, US first. No hardcoded zone list to rot.
+if [ -z "${ZONES:-}" ]; then
+  ALL="$(gcloud compute machine-types list --filter="name=$MACHINE" --format='value(zone)')"
+  ZONES="$(printf '%s\n' "$ALL" | grep '^us-'; printf '%s\n' "$ALL" | grep -v '^us-')"
+fi
+
 say(){ printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 
-# What the VM runs on boot: disable ECC (+10% bandwidth, one reboot), fetch the
-# model once, then serve with the built-in Web UI + Prometheus telemetry (--metrics).
+# What the VM runs on boot: disable ECC (+~10% bandwidth, lossless, one reboot),
+# install Docker (the CUDA base image ships the driver + nvidia-container-toolkit
+# but not docker), then serve. llama.cpp pulls the GGUF itself into the mounted
+# cache, so it survives container restarts and spot preemption.
 STARTUP="$(mktemp)"; cat > "$STARTUP" <<'SH'
 #!/bin/bash
 set -e
@@ -22,21 +31,20 @@ echo "[startup] $(date -u)"
 if nvidia-smi --query-gpu=ecc.mode.current --format=csv,noheader | grep -qi Enabled; then
   echo "[startup] disabling ECC + rebooting"; nvidia-smi -e 0 || true; reboot; exit 0
 fi
-DIR=/opt/models/Qwen3.6-35B-A3B-MTP-GGUF
-if [ ! -f "$DIR/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf" ]; then
-  echo "[startup] downloading model"; mkdir -p "$DIR"
-  pip install -q -U "huggingface_hub[hf_xet]"
-  HF_XET_HIGH_PERFORMANCE=1 python3 - <<'PY'
-from huggingface_hub import hf_hub_download
-hf_hub_download("unsloth/Qwen3.6-35B-A3B-MTP-GGUF","Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
-               local_dir="/opt/models/Qwen3.6-35B-A3B-MTP-GGUF")
-PY
+if ! command -v docker >/dev/null; then
+  echo "[startup] installing docker"
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io
+  nvidia-ctk runtime configure --runtime=docker
+  systemctl restart docker
 fi
 echo "[startup] launching server"
+mkdir -p /opt/models
 docker rm -f llama-server 2>/dev/null || true
 docker run -d --name llama-server --restart unless-stopped --gpus all -p 8080:8080 \
-  -v /opt/models:/models ghcr.io/ggml-org/llama.cpp:server-cuda \
-  --model /models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+  -e LLAMA_CACHE=/models -v /opt/models:/models \
+  ghcr.io/ggml-org/llama.cpp:server-cuda \
+  --hf-repo unsloth/Qwen3.6-35B-A3B-MTP-GGUF --hf-file Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
   --alias Qwen3.6-35B-A3B-Q4KXL-MTP --host 0.0.0.0 --port 8080 --jinja --tools all \
   --ctx-size 8192 --parallel 1 --flash-attn on -ngl 99 --n-cpu-moe 0 -ub 64 -b 512 \
   --no-mmap --threads 8 --spec-type draft-mtp --spec-draft-n-max 2 --metrics
@@ -65,11 +73,11 @@ for z in $ZONES; do
   say "No spot capacity in $z, trying next ..."
 done
 rm -f "$STARTUP"
-[ -n "$ZONE" ] || { say "No spot L4 capacity in any of: $ZONES"; exit 1; }
+[ -n "$ZONE" ] || { say "No spot L4 capacity in any offering zone"; exit 1; }
 
 IP="$(gcloud compute instances describe "$INSTANCE" --zone="$ZONE" \
         --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
-say "Created in $ZONE (IP $IP). Waiting for readiness — ECC reboot + ~22GB model download + load (~5-9 min) ..."
+say "Created in $ZONE (IP $IP). Waiting for readiness — ECC reboot + docker install + ~22GB model download + load (~6-10 min) ..."
 until curl -fsS --max-time 5 "http://$IP:8080/health" 2>/dev/null | grep -q '"status":"ok"'; do
   printf '.'; sleep 10
 done
