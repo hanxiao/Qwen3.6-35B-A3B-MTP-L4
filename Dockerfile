@@ -2,8 +2,8 @@
 #
 # Thin wrapper over the official llama.cpp CUDA server image: same validated binary, with the
 # decode-optimized launch config baked in as the default command (full GPU residency via
-# `-ngl 99 --n-cpu-moe 0` + a shrunk `-ub 64` compute buffer). Measured ~79 tok/s (prose) to
-# ~90 tok/s (structured), greedy, no prompt cache. See README for the full benchmark + ceiling analysis.
+# `-ngl 99 --n-cpu-moe 0` + a shrunk `-ub 64` compute buffer). With ECC disabled (README step 0),
+# measured ~92 tok/s (chat) to ~100 (math), greedy, no prompt cache. See README for full benchmark + analysis.
 #
 # The 22 GiB model is NOT baked in — mount it (README step 1):
 #   docker run -d --gpus all -p 8080:8080 \
@@ -13,7 +13,7 @@
 FROM ghcr.io/ggml-org/llama.cpp:server-cuda
 
 LABEL org.opencontainers.image.source="https://github.com/hanxiao/Qwen3.6-35B-A3B-MTP-L4"
-LABEL org.opencontainers.image.description="Qwen3.6-35B-A3B Q4_K_XL + MTP, decode-optimized for a single NVIDIA L4 24GB (full GPU residency, ~79-90 tok/s). Mount the GGUF at /models — see repo README."
+LABEL org.opencontainers.image.description="Qwen3.6-35B-A3B Q4_K_XL + MTP, decode-optimized for a single NVIDIA L4 24GB (full GPU residency; ~92-100 tok/s with ECC off). Mount the GGUF at /models — see repo README."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Inherits ENTRYPOINT ["/app/llama-server"] from the base image; this is the default arg set.
