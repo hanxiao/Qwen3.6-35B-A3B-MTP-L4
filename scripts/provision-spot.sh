@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Spin up a SPOT NVIDIA L4 (g2-standard-8) serving Qwen3.6-35B-A3B-MTP with the
+# Provision a SPOT NVIDIA L4 (g2-standard-8) serving Qwen3.6-35B-A3B-MTP with the
 # llama.cpp Web UI + Prometheus telemetry, and block until it's ready.
 #
 # Uses your active gcloud project + auth (gcloud config / CLOUDSDK_CORE_PROJECT).

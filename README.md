@@ -27,7 +27,7 @@ That's **~+45 % over the out-of-the-box config (63 tok/s)** — same model, same
 
 - GPU: **NVIDIA L4 24 GB** (Ada `sm_89`), ~300 GB/s memory bandwidth, 72 W TDP.
 - Instance type: **[`g2-standard-8`](https://cloud.google.com/compute/docs/general-purpose-machines#g2_machine_types)** (8 vCPU, 32 GB RAM, 1× L4) — the **minimum for this config**. The `--no-mmap` weight load needs ≥ ~24 GB host RAM, so the smaller `g2-standard-4` (4 vCPU, 16 GB) won't fit it without dropping `--no-mmap` (and `--threads 8` assumes 8 vCPUs). L4 is offered on the [G2 machine series](https://cloud.google.com/compute/docs/gpus#l4-gpus).
-- OS: Ubuntu 22.04 Deep Learning VM (`common-cu129-ubuntu-2204-nvidia-580` — ships the NVIDIA driver + CUDA + nvidia-container-toolkit). **Docker itself is *not* preinstalled on this CUDA base image**, so [`spin-up-spot.sh`](scripts/spin-up-spot.sh) runs `apt-get install -y docker.io && nvidia-ctk runtime configure --runtime=docker` at boot; do the same for a manual install (see step 2).
+- OS: Ubuntu 22.04 Deep Learning VM (`common-cu129-ubuntu-2204-nvidia-580` — ships the NVIDIA driver + CUDA + nvidia-container-toolkit). **Docker itself is *not* preinstalled on this CUDA base image**, so [`provision-spot.sh`](scripts/provision-spot.sh) runs `apt-get install -y docker.io && nvidia-ctk runtime configure --runtime=docker` at boot; do the same for a manual install (see step 2).
 - Reference instance: `qwen36-mtp-l4`, project `jinaai-dev`, zone `us-west1-a` (on-demand / non-spot).
 
 ## Model
@@ -42,7 +42,7 @@ That's **~+45 % over the out-of-the-box config (63 tok/s)** — same model, same
 
 No source build needed. The official `ghcr.io/ggml-org/llama.cpp:server-cuda` image runs MTP out of the box with `--gpus all` (verified mid-2026; the tag tracks latest master).
 
-> **One-command spot deploy:** [`scripts/spin-up-spot.sh`](scripts/spin-up-spot.sh) provisions a **spot** L4 (`g2-standard-8`, ~$0.24/hr), disables ECC, downloads the model, starts the server with **Web UI + telemetry**, opens the firewall, and **blocks until ready** — printing the live URLs. It uses your active `gcloud` project/auth (no creds in the script). Steps 0–4 below are the manual equivalent.
+> **One-command spot provision:** [`scripts/provision-spot.sh`](scripts/provision-spot.sh) provisions a **spot** L4 (`g2-standard-8`, ~$0.24/hr), disables ECC, downloads the model, starts the server with **Web UI + telemetry**, opens the firewall, and **blocks until ready** — printing the live URLs. It uses your active `gcloud` project/auth (no creds in the script). Steps 0–4 below are the manual equivalent.
 
 ### 0. Disable ECC (one-time, +~10 %, lossless)
 
