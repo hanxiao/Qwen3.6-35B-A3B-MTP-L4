@@ -42,6 +42,8 @@ That's **~+45 % over the out-of-the-box config (63 tok/s)** — same model, same
 
 No source build needed. The official `ghcr.io/ggml-org/llama.cpp:server-cuda` image runs MTP out of the box with `--gpus all` (verified mid-2026; the tag tracks latest master).
 
+> **One-command spot deploy:** [`scripts/spin-up-spot.sh`](scripts/spin-up-spot.sh) provisions a **spot** L4 (`g2-standard-8`, ~$0.24/hr), disables ECC, downloads the model, starts the server with **Web UI + telemetry**, opens the firewall, and **blocks until ready** — printing the live URLs. It uses your active `gcloud` project/auth (no creds in the script). Steps 0–4 below are the manual equivalent.
+
 ### 0. Disable ECC (one-time, +~10 %, lossless)
 
 The L4 ships with GDDR6 ECC **enabled**, costing ~10 % of memory bandwidth *and* ~1.5 GB VRAM. Decode here is memory-bandwidth-bound, so this is the single highest-ROI tweak — and it's lossless (ECC corrects rare stored-bit flips; it does not affect compute). Measured: **raw decode 65.5 → 73 tok/s; every workload +~10 %.**
