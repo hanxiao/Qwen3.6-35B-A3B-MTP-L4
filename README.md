@@ -1,6 +1,6 @@
 # Qwen3.6-35B-A3B-MTP on NVIDIA L4 24GB
 
-Deploy [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (Unsloth **Q4_K_XL** GGUF) with MTP (Multi-Token Prediction) speculative decoding on a **single NVIDIA L4 24 GB** GPU, using the **official llama.cpp Docker image**.
+Deploy [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (Unsloth **Q4_K_XL** GGUF) with MTP (Multi-Token Prediction) speculative decoding on a **single NVIDIA L4 24 GB** GPU — GCP [**`g2-standard-8`**](https://cloud.google.com/compute/docs/general-purpose-machines#g2_machine_types), the minimum instance for this config — using the **official llama.cpp Docker image**.
 
 Decode throughput across diverse inputs — measured honestly (greedy, prompt cache disabled, a fresh generation per request), **with ECC disabled** (see [step 0](#0-disable-ecc-one-time-10-lossless)):
 
@@ -27,7 +27,7 @@ That's **~+45 % over the out-of-the-box config (63 tok/s)** — same model, same
 
 - GPU: **NVIDIA L4 24 GB** (Ada `sm_89`), ~300 GB/s memory bandwidth, 72 W TDP.
 - Instance type: **[`g2-standard-8`](https://cloud.google.com/compute/docs/general-purpose-machines#g2_machine_types)** (8 vCPU, 32 GB RAM, 1× L4) — the **minimum for this config**. The `--no-mmap` weight load needs ≥ ~24 GB host RAM, so the smaller `g2-standard-4` (4 vCPU, 16 GB) won't fit it without dropping `--no-mmap` (and `--threads 8` assumes 8 vCPUs). L4 is offered on the [G2 machine series](https://cloud.google.com/compute/docs/gpus#l4-gpus).
-- OS: Ubuntu 22.04 Deep Learning VM (`common-cu129` family — ships NVIDIA driver + CUDA + Docker + nvidia-container-toolkit).
+- OS: Ubuntu 22.04 Deep Learning VM (`common-cu129-ubuntu-2204-nvidia-580` — ships the NVIDIA driver + CUDA + nvidia-container-toolkit). **Docker itself is *not* preinstalled on this CUDA base image**, so [`spin-up-spot.sh`](scripts/spin-up-spot.sh) runs `apt-get install -y docker.io && nvidia-ctk runtime configure --runtime=docker` at boot; do the same for a manual install (see step 2).
 - Reference instance: `qwen36-mtp-l4`, project `jinaai-dev`, zone `us-west1-a` (on-demand / non-spot).
 
 ## Model
@@ -66,6 +66,12 @@ pip install -q -U "huggingface_hub[hf_xet]"
 ```
 
 ### 2. Start the server
+
+> If Docker isn't installed (the `common-cu129…nvidia-580` base image ships only the driver + nvidia-container-toolkit), add it first:
+> ```bash
+> sudo apt-get update && sudo apt-get install -y docker.io
+> sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
+> ```
 
 **Easiest — prebuilt image** (the optimized config below is baked in as the default command):
 
