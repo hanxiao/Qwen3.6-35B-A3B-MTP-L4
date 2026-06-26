@@ -25,9 +25,10 @@ That's **~+45 % over the out-of-the-box config (63 tok/s)** — same model, same
 
 ## Hardware
 
-- GPU: **NVIDIA L4 24 GB** (GCE `g2-standard-8`), ~300 GB/s memory bandwidth, 72 W TDP, Ada `sm_89`
-- OS: Ubuntu 22.04 Deep Learning VM (`common-cu129` family — ships NVIDIA driver + CUDA + Docker + nvidia-container-toolkit)
-- Reference instance: `qwen36-mtp-l4`, project `jinaai-dev`, zone `us-west1-a`
+- GPU: **NVIDIA L4 24 GB** (Ada `sm_89`), ~300 GB/s memory bandwidth, 72 W TDP.
+- Instance type: **[`g2-standard-8`](https://cloud.google.com/compute/docs/general-purpose-machines#g2_machine_types)** (8 vCPU, 32 GB RAM, 1× L4) — the **minimum for this config**. The `--no-mmap` weight load needs ≥ ~24 GB host RAM, so the smaller `g2-standard-4` (4 vCPU, 16 GB) won't fit it without dropping `--no-mmap` (and `--threads 8` assumes 8 vCPUs). L4 is offered on the [G2 machine series](https://cloud.google.com/compute/docs/gpus#l4-gpus).
+- OS: Ubuntu 22.04 Deep Learning VM (`common-cu129` family — ships NVIDIA driver + CUDA + Docker + nvidia-container-toolkit).
+- Reference instance: `qwen36-mtp-l4`, project `jinaai-dev`, zone `us-west1-a` (on-demand / non-spot).
 
 ## Model
 
@@ -101,6 +102,11 @@ curl -s http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"hello"}],"max_tokens":64}'
 ```
+
+### 4. Web UI & telemetry
+
+- **Web UI:** llama.cpp serves its built-in chat UI at the server root — open **`http://<external-ip>:8080`** in a browser (enabled by default; pass `--no-webui` to disable). Open the GCE firewall first: `gcloud compute firewall-rules create allow-llama-8080 --project=jinaai-dev --allow=tcp:8080 --target-tags=llama-server --source-ranges=0.0.0.0/0` and tag the instance `--tags=llama-server` (restrict `--source-ranges` to your IP for anything beyond a demo).
+- **Telemetry:** add `--metrics` to the server command to expose Prometheus metrics at **`/metrics`** (tokens/s, prompt/eval timings, KV usage). The prebuilt image doesn't set it by default; add it via the explicit `docker run … --metrics` form.
 
 ---
 
