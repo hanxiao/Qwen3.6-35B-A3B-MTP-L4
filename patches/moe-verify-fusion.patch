@@ -1,6 +1,6 @@
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -2517,12 +2517,15 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
+@@ -2517,12 +2517,16 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
      if (cc <= GGML_CUDA_CC_PASCAL) {
          return false;
      }
@@ -196,7 +196,7 @@
              stride_row_x, stride_col_y, stride_col_dst,
              stride_channel_x, stride_channel_y, stride_channel_dst,
              ncols_dst, ids_stride, warp_size, nchannels_dst, stream);
-@@ -1149,7 +1242,7 @@ void ggml_cuda_mul_mat_vec_q(
+@@ -1149,5 +1242,5 @@ void ggml_cuda_mul_mat_vec_q(
      ggml_cuda_mm_fusion_args_device fusion_local{};
 
      if (fusion) {

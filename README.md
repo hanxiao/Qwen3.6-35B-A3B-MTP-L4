@@ -43,7 +43,7 @@ No source build needed. The official `ghcr.io/ggml-org/llama.cpp:server-cuda` im
 
 ### 0. Disable ECC (one-time, +~10 %, lossless)
 
-The L4 ships with GDDR6 ECC **enabled**, costing ~10 % of memory bandwidth *and* ~1.5 GB VRAM. Decode here is memory-bandwidth-bound, so this is the single highest-ROI tweak — and it's lossless (ECC corrects rare stored-bit flips; it does not affect compute). Measured: **raw decode 66 → 73 tok/s; every workload +~10 %.**
+The L4 ships with GDDR6 ECC **enabled**, costing ~10 % of memory bandwidth *and* ~1.5 GB VRAM. Decode here is memory-bandwidth-bound, so this is the single highest-ROI tweak — and it's lossless (ECC corrects rare stored-bit flips; it does not affect compute). Measured: **raw decode 65.5 → 73 tok/s; every workload +~10 %.**
 
 ```bash
 sudo nvidia-smi -e 0      # disable ECC (applies after reboot)
