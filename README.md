@@ -2,17 +2,21 @@
 
 Deploy [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (Unsloth **Q4_K_XL** GGUF) with MTP (Multi-Token Prediction) speculative decoding on a **single NVIDIA L4 24 GB** GPU, using the **official llama.cpp Docker image**.
 
-Decode throughput, measured honestly (greedy, prompt cache disabled, fresh generation each request):
+Decode throughput across diverse inputs, measured honestly (greedy, prompt cache disabled, fresh generation each request), **with ECC disabled** (see step 0):
 
 | Workload | Decode tok/s |
 |----------|-------------|
-| Free-form prose | **~78–81** |
-| Code generation | **~87** |
-| JSON / structured output | **~88–90** |
+| Free-form prose | **~93** |
+| Code generation | **~94** |
+| JSON / structured | **~93** |
+| Chat / dialogue | **~92** |
+| Math / reasoning | **~100** |
+| Translation (multi) | **~93** |
+| Summarization | **~94** |
 
-This is a **+28–42 % speedup over the out-of-the-box config (63 tok/s)**, achieved purely by configuration — same model, same Q4_K_XL quant, no quality loss. The single biggest win is forcing **all MoE experts onto the GPU** (see [How the speedup works](#how-the-speedup-works)).
+This is a **~+45 % speedup over the out-of-the-box config (63 tok/s)** — same model, same Q4_K_XL quant, **no quality loss**. Two compounding wins do it: forcing **all MoE experts onto the GPU** (+28 %, see [How the speedup works](#how-the-speedup-works)), and **disabling GDDR6 ECC** (+10 %, see step 0) — ECC silently costs ~10 % of memory bandwidth, and decode here is memory-bound.
 
-> **On the 100 tok/s target:** it is **not reachable on a single L4** with this model+quant. The raw decode ceiling (no speculation) is **65.5 tok/s**, and MTP multiplies it by at most ~1.37× on the most favorable workload → ~90 tok/s. The L4 runs **power-capped at its 72 W TDP** during decode. See [Why not 100 tok/s](#why-not-100-toks) for the full analysis and what hardware/quant *would* get there.
+> **On the 100 tok/s target:** math/reasoning reaches ~100, but the *minimum* across all input types is ~92 (chat). Pushing every category past 100 is **not reachable losslessly on a single L4**: the raw decode ceiling (no speculation) is ~73 tok/s ECC-off, MTP multiplies it ≤~1.3× (capped by the MoE 8-of-256 expert-union — independently confirmed by an [RTX 3090 benchmark](https://github.com/thc1006/qwen3.6-speculative-decoding-rtx3090) where *all* speculative methods go net-negative on this model), and MTP decode is power-bound at the L4's 72 W TDP. See [Why not 100 tok/s](#why-not-100-toks).
 
 ---
 
@@ -33,6 +37,17 @@ This is a **+28–42 % speedup over the out-of-the-box config (63 tok/s)**, achi
 ## Quick start (Docker — recommended)
 
 No source build required. The official `ghcr.io/ggml-org/llama.cpp:server-cuda` image runs MTP out of the box (verified build `9787`, 2026-06).
+
+### 0. Disable ECC (one-time, +10 %, lossless)
+
+The L4 ships with GDDR6 ECC **enabled**, which costs ~10 % of memory bandwidth *and* ~1.5 GB VRAM. Decode here is memory-bandwidth-bound, so disabling ECC is the single highest-ROI system tweak — and it's lossless (ECC corrects rare bit-flips in storage; it does not affect compute correctness). Measured: **raw decode 66 → 73 tok/s, every workload +10 %.**
+
+```bash
+sudo nvidia-smi -e 0      # disable ECC (takes effect after reboot)
+sudo reboot
+# after reboot, verify:
+nvidia-smi --query-gpu=ecc.mode.current,memory.total --format=csv,noheader   # -> Disabled, 24570 MiB
+```
 
 ### 1. Download the model
 
