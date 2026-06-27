@@ -25,6 +25,18 @@ fi
 
 say(){ printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 
+# Optional: a custom image with docker + the llama.cpp image pre-baked removes the
+# ~168 s install/pull from cold start (build once via scripts/build-tooling-image.sh).
+# Auto-detected; falls back to the stock CUDA base image when absent.
+TOOLING_FAMILY="${TOOLING_FAMILY:-qwen36-mtp-l4-tooling}"
+PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
+if [ -n "$PROJECT" ] && gcloud compute images describe-from-family "$TOOLING_FAMILY" --project="$PROJECT" >/dev/null 2>&1; then
+  IMG=(--image-family="$TOOLING_FAMILY" --image-project="$PROJECT")
+  say "Using pre-baked tooling image: $TOOLING_FAMILY (docker + llama.cpp image baked)"
+else
+  IMG=(--image-family=common-cu129-ubuntu-2204-nvidia-580 --image-project=deeplearning-platform-release)
+fi
+
 # Boot script: (1) disable ECC + reboot once; (2) on the 2nd boot, fetch the model and
 # prepare docker IN PARALLEL, then serve from the local file. Logs phase timestamps to
 # /var/log/qwen-startup.log. GCS_MODEL is substituted in (not a heredoc var) so the bucket
@@ -49,7 +61,7 @@ MODEL=/opt/models/model.gguf
     nvidia-ctk runtime configure --runtime=docker
     systemctl restart docker
   fi
-  docker pull ghcr.io/ggml-org/llama.cpp:server-cuda
+  docker image inspect ghcr.io/ggml-org/llama.cpp:server-cuda >/dev/null 2>&1 || docker pull ghcr.io/ggml-org/llama.cpp:server-cuda
   echo "[startup] docker+image ready \$(date -u +%H:%M:%S)"
 ) &
 DPID=\$!
@@ -96,8 +108,7 @@ for z in $ZONES; do
       --zone="$z" --machine-type="$MACHINE" \
       --provisioning-model=SPOT --instance-termination-action=STOP \
       --maintenance-policy=TERMINATE \
-      --image-family=common-cu129-ubuntu-2204-nvidia-580 \
-      --image-project=deeplearning-platform-release \
+      "${IMG[@]}" \
       --boot-disk-size=80GB --boot-disk-type=pd-ssd \
       --tags=llama-server \
       --metadata-from-file=startup-script="$STARTUP"; then
