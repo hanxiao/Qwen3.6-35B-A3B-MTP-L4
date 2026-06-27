@@ -2,16 +2,22 @@
 # Provision a SPOT NVIDIA L4 (g2-standard-8) serving Qwen3.6-35B-A3B-MTP with the
 # llama.cpp Web UI + Prometheus telemetry, and block until it's ready.
 #
-# Uses your active gcloud project + auth (gcloud config / CLOUDSDK_CORE_PROJECT).
-# Zones are enumerated live from the GCP API (every zone that offers the VM),
-# US first so the Web UI stays low-latency. Override any of these via env:
-#   ZONES="zone-a zone-b ..."   INSTANCE=name   MACHINE=g2-standard-8
+# Cold-start optimized (~3-5 min vs ~10): the 22 GB GGUF is pulled from a same-region
+# GCS bucket (sliced parallel download, ~60 s) instead of HuggingFace, and the docker
+# install + image pull run concurrently with the model fetch. ECC-off reboot is kept
+# (load-bearing: frees the VRAM that lets --ctx-size 56320 fit). HF is the fallback.
+#
+# Uses your active gcloud project + auth. Zones are enumerated live (US first).
+# Override via env: ZONES="zone-a ..."  INSTANCE=name  MACHINE=g2-standard-8
+#   GCS_MODEL=gs://bucket/path/model.gguf   (same-region bucket; see scripts/stage-model-gcs.sh)
 set -euo pipefail
 
 INSTANCE="${INSTANCE:-qwen36-mtp-l4-spot}"
 MACHINE="${MACHINE:-g2-standard-8}"
+GCS_MODEL="${GCS_MODEL:-gs://jinaai-dev-qwen36-mtp-l4/model.gguf}"
 
-# Every zone that offers $MACHINE, US first. No hardcoded zone list to rot.
+# Every zone that offers $MACHINE, US first (the GCS bucket is us-central1, so a US
+# landing keeps the model read in-region). No hardcoded zone list to rot.
 if [ -z "${ZONES:-}" ]; then
   ALL="$(gcloud compute machine-types list --filter="name=$MACHINE" --format='value(zone)')"
   ZONES="$(printf '%s\n' "$ALL" | grep '^us-'; printf '%s\n' "$ALL" | grep -v '^us-')"
@@ -19,36 +25,63 @@ fi
 
 say(){ printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 
-# What the VM runs on boot: disable ECC (+~10% bandwidth, lossless, one reboot),
-# install Docker (the CUDA base image ships the driver + nvidia-container-toolkit
-# but not docker), then serve. llama.cpp pulls the GGUF itself into the mounted
-# cache, so it survives container restarts and spot preemption.
-STARTUP="$(mktemp)"; cat > "$STARTUP" <<'SH'
+# Boot script: (1) disable ECC + reboot once; (2) on the 2nd boot, fetch the model and
+# prepare docker IN PARALLEL, then serve from the local file. Logs phase timestamps to
+# /var/log/qwen-startup.log. GCS_MODEL is substituted in (not a heredoc var) so the bucket
+# path travels with the instance metadata.
+STARTUP="$(mktemp)"; cat > "$STARTUP" <<SH
 #!/bin/bash
 set -e
 exec >>/var/log/qwen-startup.log 2>&1
-echo "[startup] $(date -u)"
+echo "[startup] boot \$(date -u +%H:%M:%S)"
 if nvidia-smi --query-gpu=ecc.mode.current --format=csv,noheader | grep -qi Enabled; then
   echo "[startup] disabling ECC + rebooting"; nvidia-smi -e 0 || true; reboot; exit 0
 fi
-if ! command -v docker >/dev/null; then
-  echo "[startup] installing docker"
-  DEBIAN_FRONTEND=noninteractive apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io
-  nvidia-ctk runtime configure --runtime=docker
-  systemctl restart docker
-fi
-echo "[startup] launching server"
+echo "[startup] ECC off — parallel provision \$(date -u +%H:%M:%S)"
 mkdir -p /opt/models
+MODEL=/opt/models/model.gguf
+
+# (a) docker engine + server image
+(
+  if ! command -v docker >/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io
+    nvidia-ctk runtime configure --runtime=docker
+    systemctl restart docker
+  fi
+  docker pull ghcr.io/ggml-org/llama.cpp:server-cuda
+  echo "[startup] docker+image ready \$(date -u +%H:%M:%S)"
+) &
+DPID=\$!
+
+# (b) the 22 GB model: same-region GCS (fast), HuggingFace as fallback
+(
+  if [ ! -f "\$MODEL" ]; then
+    if gcloud storage cp "$GCS_MODEL" "\$MODEL"; then
+      echo "[startup] model from GCS \$(date -u +%H:%M:%S)"
+    else
+      echo "[startup] GCS miss -> HF fallback \$(date -u +%H:%M:%S)"
+      pip install -q -U "huggingface_hub[hf_xet]"
+      HF_XET_HIGH_PERFORMANCE=1 python3 - <<'PY'
+from huggingface_hub import hf_hub_download
+hf_hub_download("unsloth/Qwen3.6-35B-A3B-MTP-GGUF","Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",local_dir="/opt/models")
+PY
+      ln -sf /opt/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf "\$MODEL"
+    fi
+  fi
+) &
+MPID=\$!
+
+wait \$DPID; wait \$MPID
+echo "[startup] launching server \$(date -u +%H:%M:%S)"
 docker rm -f llama-server 2>/dev/null || true
 docker run -d --name llama-server --restart unless-stopped --gpus all -p 8080:8080 \
-  -e LLAMA_CACHE=/models -v /opt/models:/models \
-  ghcr.io/ggml-org/llama.cpp:server-cuda \
-  --hf-repo unsloth/Qwen3.6-35B-A3B-MTP-GGUF --hf-file Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+  -v /opt/models:/models ghcr.io/ggml-org/llama.cpp:server-cuda \
+  --model /models/model.gguf \
   --alias Qwen3.6-35B-A3B-Q4KXL-MTP --host 0.0.0.0 --port 8080 --jinja --tools all \
   --ctx-size 56320 --parallel 1 --flash-attn on -ngl 99 --n-cpu-moe 0 -ub 64 -b 512 \
-  --no-mmap --threads 8 --spec-type draft-mtp --spec-draft-n-max 2 --metrics
-echo "[startup] done"
+  --no-mmap --threads 8 --spec-type draft-mtp --spec-draft-n-max 2 --no-warmup --metrics
+echo "[startup] done \$(date -u +%H:%M:%S)"
 SH
 
 say "Opening firewall for :8080 (Web UI + API + /metrics) ..."
@@ -65,7 +98,7 @@ for z in $ZONES; do
       --maintenance-policy=TERMINATE \
       --image-family=common-cu129-ubuntu-2204-nvidia-580 \
       --image-project=deeplearning-platform-release \
-      --boot-disk-size=120GB --boot-disk-type=pd-balanced \
+      --boot-disk-size=80GB --boot-disk-type=pd-ssd \
       --tags=llama-server \
       --metadata-from-file=startup-script="$STARTUP"; then
     ZONE="$z"; break
@@ -77,7 +110,7 @@ rm -f "$STARTUP"
 
 IP="$(gcloud compute instances describe "$INSTANCE" --zone="$ZONE" \
         --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
-say "Created in $ZONE (IP $IP). Waiting for readiness — ECC reboot + docker install + ~22GB model download + load (~6-10 min) ..."
+say "Created in $ZONE (IP $IP). Waiting for readiness — ECC reboot + parallel(docker, ~22GB GCS pull) + load (~3-5 min) ..."
 until curl -fsS --max-time 5 "http://$IP:8080/health" 2>/dev/null | grep -q '"status":"ok"'; do
   printf '.'; sleep 10
 done

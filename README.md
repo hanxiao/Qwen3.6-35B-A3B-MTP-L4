@@ -215,6 +215,26 @@ For context beyond 56 K, a near-lossless quantized KV cache (`--cache-type-k q8_
 
 ---
 
+## Cold start (provisioning)
+
+`provision-spot.sh` is tuned to reach a healthy endpoint fast. The 22 GB GGUF is staged once in a **same-region GCS bucket** ([`scripts/stage-model-gcs.sh`](scripts/stage-model-gcs.sh)) and pulled with a sliced parallel download instead of from HuggingFace; the docker install, image pull, and model fetch run **concurrently**; the boot disk is **pd-ssd**; and the server starts with `--no-warmup`.
+
+Measured cold start (first boot → `/health=ok`) on a spot `g2-standard-8`:
+
+| Phase | Before | After |
+|-------|--------|-------|
+| ECC-disable + reboot (irreducible) | ~90 s | ~30 s |
+| 22 GB model fetch | 300–480 s (HuggingFace) | **72 s** (GCS, sliced — even cross-region) |
+| docker install + image pull | ~180 s | ~168 s (now the bottleneck; overlaps the model fetch) |
+| launch + load → `/health` | 30–60 s | ~10 s |
+| **first boot → `/health`** | **~10 min** | **~3.5 min** |
+
+The ECC-off reboot stays — it's load-bearing (frees the VRAM that lets `--ctx-size 56320` fit); skipping it to shave time would be a hidden regression. Spot zone-search/acquisition time is separate and varies with stockouts.
+
+> **Next lever:** baking docker + the llama.cpp image into a small custom GCE image removes the ~168 s install/pull (the model stays in GCS, updated independently) — projecting **~2 min** — at the cost of rebuilding that image on llama.cpp upgrades.
+
+---
+
 ## Operations
 
 ```bash
