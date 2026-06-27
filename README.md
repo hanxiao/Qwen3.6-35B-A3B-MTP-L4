@@ -91,7 +91,7 @@ sudo docker run -d --name llama-server --restart unless-stopped \
   --model /models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
   --alias Qwen3.6-35B-A3B-Q4KXL-MTP \
   --host 0.0.0.0 --port 8080 --jinja --tools all \
-  --ctx-size 8192 --parallel 1 \
+  --ctx-size 56320 --parallel 1 \
   --flash-attn on \
   -ngl 99 --n-cpu-moe 0 \
   -ub 64 -b 512 \
@@ -124,7 +124,7 @@ curl -s http://localhost:8080/v1/chat/completions \
 |------|-------|-----|
 | `-ngl 99 --n-cpu-moe 0` | all layers + **all experts on GPU** | the #1 lever (+~28 %). See below. |
 | `-ub 64 -b 512` | tiny micro-batch | shrinks the compute buffer by ~1 GB, freeing exactly enough VRAM for `--n-cpu-moe 0` to fit. Decode is batch-1, so this costs nothing at generation time. |
-| `--ctx-size` | 8 K → up to **56 K** | KV is only ~22 KiB/token, so the full model stays on-GPU (`--n-cpu-moe 0`) up to **56,320 tokens** — no expert offload, no speed loss. See [context length](#context-length). |
+| `--ctx-size 56320` | 56 K | the measured max before OOM. KV is only ~22 KiB/token, so the full model stays on-GPU (`--n-cpu-moe 0`) at 56 K — no expert offload, no speed loss. **Requires ECC off** ([context length](#context-length)). |
 | `--flash-attn on` | — | required; keeps the default f16 KV cache (which keeps CUDA graphs enabled). |
 | `--spec-type draft-mtp --spec-draft-n-max 2` | MTP, 2 drafts | n-max=2 is optimal across workloads (higher values drop acceptance faster than they add tokens). |
 | `--no-mmap --threads 8` | — | weights resident in RAM/VRAM (no paging); 8 vCPUs. |
@@ -208,7 +208,7 @@ The model's train context is 262 K; on a single L4 the only limit is VRAM. Binar
 
 - **Max = 56,320 tokens** before OOM (first OOM at 57,344), at **full GPU residency** (`--n-cpu-moe 0`) — **no expert offload**. The KV cache is only **~22 KiB/token** (heavy GQA), so the ~1.5 GiB left after weights holds ~48 K tokens more than the old 8 K default — a **6.9× increase, lossless**.
 - **Speed is unaffected by the limit:** a short request decodes at **95–98 tok/s whether ctx is 8 K, 49 K, or 56 K** (the complete Döner-kebab generation ran at **98.0 tok/s at ctx = 49,152**). Decode only slows as you *actually fill* tens of thousands of tokens — that's KV-read cost, not a config penalty. So raising the limit is free for normal requests.
-- **Requires ECC off.** The ~1.5 GiB freed in [step 0](#0-disable-ecc-one-time-10-lossless) is exactly what makes 56 K fit. [`provision-spot.sh`](scripts/provision-spot.sh) disables ECC and therefore **defaults to `--ctx-size 56320`**. The prebuilt image / `docker-compose.yml` stay at **8 K** so they're safe even with ECC *on* — raise it only after confirming ECC is off.
+- **ECC off is the assumed precondition.** The ~1.5 GiB freed in [step 0](#0-disable-ecc-one-time-10-lossless) is exactly what makes 56 K fit, so **`--ctx-size 56320` is the default everywhere** — [`provision-spot.sh`](scripts/provision-spot.sh) (which disables ECC for you), the prebuilt image, and [`docker-compose.yml`](docker-compose.yml). Disable ECC first; on an ECC-*on* card 56 K will OOM at load (drop `--ctx-size` to fit if you can't).
 - **Headroom is thin at the ceiling:** 56,320 sits at ~98 % VRAM (~480 MiB free). The GGUF lazy-loads a **1,134 MiB multimodal projector** on the first image request, which would OOM near the ceiling — so for text **+ vision** keep ctx well below 56 K (≤32 K is comfortable).
 
 For context beyond 56 K, a near-lossless quantized KV cache (`--cache-type-k q8_0 --cache-type-v q8_0`) pushes the limit further toward the 256 K train ceiling, at a small quality/speed cost — a different target than this repo's (max decode tok/s, lossless).

@@ -5,6 +5,9 @@
 # `-ngl 99 --n-cpu-moe 0` + a shrunk `-ub 64` compute buffer). With ECC disabled (README step 0),
 # measured ~92 tok/s (chat) to ~100 (math), greedy, no prompt cache. See README for full benchmark + analysis.
 #
+# Defaults to --ctx-size 56320 (the measured max before OOM on a 24 GB L4). This REQUIRES ECC off
+# (README step 0) — on an ECC-on card it will OOM at load; drop --ctx-size to fit if you can't disable ECC.
+#
 # The 22 GiB model is NOT baked in — mount it (README step 1):
 #   docker run -d --gpus all -p 8080:8080 \
 #     -v ~/models:/models \
@@ -21,7 +24,7 @@ CMD ["--model", "/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.ggu
      "--alias", "Qwen3.6-35B-A3B-Q4KXL-MTP", \
      "--host", "0.0.0.0", "--port", "8080", \
      "--jinja", "--tools", "all", \
-     "--ctx-size", "8192", "--parallel", "1", \
+     "--ctx-size", "56320", "--parallel", "1", \
      "--flash-attn", "on", \
      "-ngl", "99", "--n-cpu-moe", "0", \
      "-ub", "64", "-b", "512", \
