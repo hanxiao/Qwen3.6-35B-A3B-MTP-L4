@@ -46,7 +46,7 @@ docker run -d --name llama-server --restart unless-stopped --gpus all -p 8080:80
   ghcr.io/ggml-org/llama.cpp:server-cuda \
   --hf-repo unsloth/Qwen3.6-35B-A3B-MTP-GGUF --hf-file Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
   --alias Qwen3.6-35B-A3B-Q4KXL-MTP --host 0.0.0.0 --port 8080 --jinja --tools all \
-  --ctx-size 8192 --parallel 1 --flash-attn on -ngl 99 --n-cpu-moe 0 -ub 64 -b 512 \
+  --ctx-size 56320 --parallel 1 --flash-attn on -ngl 99 --n-cpu-moe 0 -ub 64 -b 512 \
   --no-mmap --threads 8 --spec-type draft-mtp --spec-draft-n-max 2 --metrics
 echo "[startup] done"
 SH
