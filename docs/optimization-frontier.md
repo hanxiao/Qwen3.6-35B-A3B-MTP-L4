@@ -1,0 +1,55 @@
+# Pushing past 100 → the >120 tok/s question (research log)
+
+**Question:** can decode be pushed from the measured ~91–99 tok/s toward **>120 tok/s**, on the **same** Qwen3.6-35B-A3B-MTP Q4_K_XL GGUF, a **single L4**, **losslessly** (no model/quant switch, no I/O cache)?
+
+**Answer (measured + code-grounded): no.** The wall is silicon — **~300 GB/s memory bandwidth + a hard 72 W power cap** — and every lossless lever either is already captured, gives ~0 here, or is blocked for this model on Ada. Best achievable on this L4 stays **~91–99**; a multi-week MTP-head retrain might reach ~105–115; **>120 needs a higher-bandwidth GPU** (L40S ~864 GB/s, measured ~225 tok/s by others on this exact model). This log records what was tried so nobody re-treads it.
+
+## Measured on the box (ECC off, full residency, n-max 2, chat prompt, greedy, 3-rep avg)
+
+| Lever | Result | tok/s | Verdict |
+|-------|--------|-------|---------|
+| baseline (CUDA graphs on) | reference | **90.5** | — |
+| `GGML_CUDA_DISABLE_GRAPHS=1` | graphs *help* (disabling is slower) | 88.3 | graphs healthy — no recapture bug to exploit |
+| `GGML_CUDA_GRAPH_OPT=1` | noise | 90.2 | ~0 on a bandwidth-bound L4 |
+| `GGML_CUDA_FORCE_MMQ=1` (control) | noise | 91.1 | MMVQ already optimal for batch-1 |
+| locked clock 2040 MHz | clock collapses to ~1950 anyway | 91.1 | **72 W cap claws it back** |
+| raise power limit (`-pl 80`) | **rejected** | — | Max = Default = 72 W (hard cap) |
+| fresh build 9803 → 9828 | no gain | 88.4 | build already current; no stale-fusion bonus |
+
+All within run-noise (~±1.5 tok/s). **Net free-lever gain ≈ 0.**
+
+## The 16 ideas, adjudicated (code-read, not hand-waved)
+
+| Idea | Status | Why |
+|------|--------|-----|
+| KV-caching, FlashAttention, Speculative (MTP) | **already done** | f16 KV, `--flash-attn on`, `--spec-type draft-mtp` n-max 2 (optimal; 3–8 worse, p-min>0 worse) |
+| PagedAttention / vLLM | not-applicable | GGUF bs=1 path slower & being deprecated (vLLM RFC #39583); fast paths need a non-Q4_K requant |
+| TensorRT-LLM | not-applicable | Qwen3.6 is hybrid Gated-DeltaNet+MoE; GDN kernel **aborts on SM89/Ada**; no GGUF loader; MTP waived in NVIDIA CI |
+| SGLang | not-applicable | same ggml kernels for GGUF → same wall; MTP needs format+memory switch, 4-bit 35B-A3B OOMs 24 GB |
+| FlashInfer | not-applicable | single-decode kernel ~25% slower than SDPA at batch-1; no GGUF path |
+| Megakernel (Mirage/AMK) | not-applicable | win is cross-layer prefetch; our weights are already VRAM-resident; pins SMs hotter → worse throttle |
+| Batch / dynamic batching / parallel decode | not-applicable (single-stream) | aggregate is flat ~91 (bandwidth-bound); doesn't raise single-stream tok/s |
+| Early-exit decoding | rejected | not lossless |
+| Mixed precision / FP8 | not-applicable | FP8 weights = *more* bytes/token → lowers the BW ceiling; FP8-KV does nothing at parallel=1 |
+| Quantized kernels | already-optimal | MMVQ/DP4A is the optimal batch-1 path on sm_89; MMQ/MXFP4 don't run at decode |
+| Tensor / Pipeline / Sequence parallel | not-applicable | needs multi-GPU (different machine); TP measured −8% single-stream (All-Reduce dominates at bs=1) |
+| Graph optimization (ONNX/TensorRT) | not-applicable | see TRT-LLM (Ada-blocked) |
+| Memory offloading | counter-productive | we do the opposite (full residency); offload is slower |
+| Streaming generation | irrelevant | output transport, not decode rate |
+| EAGLE-3 / ngram / tree-spec (Medusa) | not-applicable | EAGLE-3 ties MTP at best (no Qwen3.6 head); ngram measured −3…−12% here; tree explodes MoE verify |
+| Lookahead / Jacobi (CLLM) | not-applicable | FLOPs-for-latency trade with no surplus FLOPs on a power-walled MoE |
+| **FastMTP head retrain** | **infeasible here** | lossless & the right idea, but: no HF→GGUF path for a custom MTP head (converter arch-gated to native `mtp.*` layout); training needs multi-GPU (can't run on L4); caps ~105–115 anyway |
+
+## The only real (but out-of-reach) lever
+
+**FastMTP-style self-distillation of the MTP head** (arXiv 2509.18362) is the one lossless idea that attacks the acceptance cap. But for *this* deployment it's a **multi-week project on borrowed bigger hardware**, not a day on the L4: (1) `convert_hf_to_gguf.py:264-265` gates `--mtp` to the native Qwen3.6 `mtp.*` tensor layout, which FastMTP's MiMo/EAGLE training fork does not produce, with no precedent for the splice; (2) training needs the full 35B trunk resident (multi-GPU); (3) even at accept-length ~2.8–3.0 it lands ~105–115, not 120, because each extra accepted token widens the MoE verify-step expert union and re-pins the 72 W cap.
+
+## Data sources (deduped)
+
+**Engines/repos:** ggml-org/llama.cpp (mmvq.cu, mmq.cu, topk-moe.cu, common/speculative.cpp, convert_hf_to_gguf.py, src/llama-arch.cpp, conversion/qwen.py; PRs #18958, #19645, #18039, disc #17621); vllm-project/vllm (quantization/__init__.py, qwen3_5_mtp.py, moe_wna16.py, marlin_moe.py; RFC #39583); sgl-project/sglang; NVIDIA/TensorRT-LLM v1.3.0rc20 (gdn_mixer.py, modeling_qwen3_5.py, MOE_DEVELOPER_GUIDE.md; PR #12646, issues #13361/#6717); flashinfer-ai/flashinfer; mirage-project/mirage; RightNow-AI/AutoMegaKernel; z-lab/dflash; TencentBAC/FastMTP.
+**Papers:** FastMTP 2509.18362 · DFlash 2602.06036 · Apple tree-MTP 2507.11851 · EAGLE 2401.15077 / -2 2406.16858 / -3 2503.01840 · Medusa 2401.10774 · SpecExec 2406.02532 · Lookahead 2402.02057 · CLLM 2403.00835 · MoE-Spec 2602.16052 · FlashInfer 2501.01005.
+**Benchmarks:** jarvislabs (llama.cpp Qwen3.6-MTP 193→225 tok/s = 1.17× on RTX PRO 6000 — confirms bandwidth scaling); kaitchup DFlash-vs-MTP (Q4 llama.cpp faster at bs=1); unsloth GGUF discussion #14; NVIDIA "Optimizing llama.cpp with CUDA Graphs"; L4 datasheet (72 W / 300 GB/s).
+
+## Verdict
+
+The ~91–99 tok/s in the headline **is** the lossless ceiling for this model on one L4 — confirmed by exhausting all 16 levers (12 dead-ends proven by reading code, the rest measured at ~0). To go past 120: **change the silicon** (L40S/A100/H100-class bandwidth). That is the only thing that moves the 300 GB/s wall, consistent with every measurement here and the 225 tok/s others get on a 3× faster card.

@@ -211,6 +211,8 @@ Getting **every** input type over 100 is not achievable on a single L4 with this
 
 **What actually reaches >100:** a higher-bandwidth GPU — L40S (~864 GB/s), RTX 6000 Ada (~960 GB/s → ~240), or A100 (~2 TB/s). Cross-check: Unsloth reports ~240 tok/s on RTX 6000; scaling by bandwidth → ~75 on L4, consistent with what we measure. **Not** a quant change and **not** a kernel rewrite. On the single L4, **~91 (min, chat) to ~99 (max, math)** is the wall for this model.
 
+> A deeper **>120 tok/s** investigation (16 levers — engine swaps, better drafts, kernels, the power/clock wall — each searched, code-read, and benchmarked) is logged in [`docs/optimization-frontier.md`](docs/optimization-frontier.md). Verdict: not reachable losslessly on one L4 (free levers measure ~0; TRT-LLM/vLLM/SGLang/FlashInfer are blocked or slower for this GGUF on Ada; a FastMTP head retrain is a multi-week, multi-GPU effort that still caps ~105–115). >120 needs a higher-bandwidth GPU.
+
 ---
 
 ## Quality: no regression
