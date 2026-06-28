@@ -65,6 +65,21 @@ Checked whether a different driver, CUDA toolkit, GCP DLVM image, NGC container,
 
 So no version/build/driver/image change helps — you are already on the newest, optimally-compiled stack, and the walls are hardware.
 
+## Community / fork levers (Reddit, deep GitHub, ik_llama) — benchmarked, also ~0
+
+A second deep search (r/LocalLLaMA, deep GitHub issues/PRs/forks, NVIDIA forums, HN) surfaced concrete community tricks; every lossless one was **benchmarked on the box** and none beats mainline on our exact Q4_K_XL + f16 KV:
+
+| Lever | Source | Measured result |
+|-------|--------|-----------------|
+| **ik_llama.cpp** (fork, faster `iqk` MoE kernels) | r/LocalLLaMA 1tjh7az (claimed 89→110); ikawrakow/ik_llama.cpp | **Loses.** Clean same-session A/B (same prompts, same clean GPU): mainline vs ik = chat 82.5 vs 80.5, **code 91.4 vs 83.4**, json 93.7 vs 92.7. Raw decode 70 vs 69.4 (tie). ik's MTP acceptance is *lower* (code 0.77 vs 0.67). Both lossless (17×23→391). The community's 110 tok/s uses `iq4_xs` + quantized KV = a quant change (off-limits). |
+| **Spec-chaining** (`--spec-type draft-mtp` + `ngram-mod`) | llama.cpp PR #23269 | **~0.** code 86.6 vs 85.8 baseline (noise); acceptance unchanged. ngram doesn't fire usefully on this content. |
+| **MTP gate sweep** (n-max 3/4, p-min 0.6) | thefrontierlab / carteakey | **~0.** n3 87.5, n4+p-min0.6 87.8 vs 87.3 baseline (all noise). Re-confirms n-max=2 optimal. |
+| `--spec-autotune` (ik bandit) | ik PR #1595 | n/a — ik loses outright, so its autotune can't help here. |
+| `GGML_CUDA_GRAPH_OPT=1`, FORCE_MMQ, clock-pin | NVIDIA blog / ggml | **~0** (measured earlier — all within noise). |
+| PowerInfer / lookahead / Medusa / DFlash | various | not-applicable or non-lossless (extra model / quant change / OOM on 24 GB). |
+
+**Honest note:** the community DOES have big numbers for this model (110–157 tok/s on ik), but every one is built on `iq4_xs`/`q4_0`-KV — a *different quantization*, which violates the lossless/same-weights constraint and would be cheating against the goal. On the **same Q4_K_XL weights + f16 KV**, mainline llama.cpp is already at/above every community alternative.
+
 ## Verdict
 
 The ~91–99 tok/s in the headline **is** the lossless ceiling for this model on one L4 — confirmed by exhausting all 16 levers (12 dead-ends proven by reading code, the rest measured at ~0). To go past 120: **change the silicon** (L40S/A100/H100-class bandwidth). That is the only thing that moves the 300 GB/s wall, consistent with every measurement here and the 225 tok/s others get on a 3× faster card.
