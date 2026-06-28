@@ -2,24 +2,26 @@
 
 Deploy [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (Unsloth **Q4_K_XL** GGUF) with MTP (Multi-Token Prediction) speculative decoding on a **single NVIDIA L4 24 GB** GPU — GCP [**`g2-standard-8`**](https://cloud.google.com/compute/docs/general-purpose-machines#g2_machine_types), the minimum instance for this config — using the **official llama.cpp Docker image**.
 
-Decode throughput across diverse inputs — measured honestly (greedy, prompt cache disabled, a fresh generation per request), **with ECC disabled** (see [step 0](#0-disable-ecc-one-time-10-lossless)):
+Decode throughput across diverse inputs on the **production config** (ECC off, full GPU residency, `--parallel 1`, n-max 2) — measured honestly (greedy, prompt cache disabled, a fresh generation per request, 256 tokens, 2-rep average; reproduce with [`scripts/bench.sh`](scripts/bench.sh)):
 
 | Workload | Decode tok/s |
 |----------|-------------|
-| Free-form prose | **~93** |
-| Code generation | **~94** |
-| JSON / structured | **~93** |
-| Chat / dialogue | **~92** |
-| Math / reasoning | **~100** |
-| Translation (multilingual) | **~93** |
-| Summarization | **~94** |
+| Free-form prose | **92.5** |
+| Code generation | **93.0** |
+| JSON / structured | **92.0** |
+| Chat / dialogue | **90.6** ← min |
+| Math / reasoning | **98.8** ← max |
+| Translation (multilingual) | **91.7** |
+| Summarization | **93.1** |
 
-That's **~+45 % over the out-of-the-box config (63 tok/s)** — same model, same Q4_K_XL quant, **no quality loss**. Two compounding, lossless wins do it:
+So the production range is **~91 (chat) → ~99 (math) tok/s** — throughput is workload-dependent (it tracks MTP acceptance, which is higher on predictable content like math). That's **~+45 % over the out-of-the-box config (63 tok/s)** — same model, same Q4_K_XL quant, **no quality loss**. Two compounding, lossless wins do it:
 
 1. **Full GPU residency** — force all MoE experts onto the GPU (+~28 %, [how](#how-the-two-wins-were-measured)).
 2. **Disable GDDR6 ECC** — it silently costs ~10 % of memory bandwidth, and decode here is memory-bound (+~10 %, [step 0](#0-disable-ecc-one-time-10-lossless)).
 
-> **On the 100 tok/s target:** math/reasoning reaches ~100, but the *minimum* across all input types is ~92 (chat). Getting **every** category over 100 is **not achievable on a single L4** with this model+quant — proven by measurement, not assumption (see [Why not 100](#why-not-100-toks)). It needs a higher-bandwidth GPU; a lower quant actually makes it *slower*.
+> **On the 100 tok/s target:** math/reasoning peaks at ~99, but the *minimum* across all input types is ~91 (chat). Getting **every** category over 100 is **not achievable on a single L4** with this model+quant — proven by measurement, not assumption (see [Why not 100](#why-not-100-toks)). It needs a higher-bandwidth GPU; a lower quant actually makes it *slower*.
+>
+> **Reading the numbers in this README:** the table above is the production figure. The tables in later sections are deliberately *isolation experiments* — some are ECC-**on** (to measure the ECC lever in isolation), others use a single fixed prompt to compare one parameter (n-max, p-min, parallel slots) or a harder/longer prompt. Their absolute tok/s sit **below** this headline by design (ECC-on is ~10 % slower; a harder prompt has lower MTP acceptance) — each table says which. Don't read those as the deployed speed.
 
 ---
 
@@ -152,7 +154,7 @@ The Q4_K_XL weights are ~21.3 GiB on a ~22.5 GiB-usable card. By default llama.c
 | 1 | 76.9 | 21624 MiB |
 | **0 (all on GPU)** | **80.9** | 21918 MiB |
 
-**Win 2 — ECC off** then adds a uniform **~+10 %** on top, yielding the headline ~92–100 tok/s. The two compound to ~+45 % overall.
+**Win 2 — ECC off** then adds a uniform **~+10 %** on top — so the `80.9` above (ECC-on) becomes ~89, and across the 7 workloads the average lands at the headline **~91–99 tok/s**. The two wins compound to ~+45 % overall. (The table above is ECC-**on** to isolate Win 1 — that's why its numbers are lower than the headline.)
 
 ---
 
@@ -179,9 +181,9 @@ n-max=2 is the sweet spot — higher values verify more draft tokens but accepta
 | 4 | 77 | 0.57 |
 | 6 | 70 | 0.44 |
 
-*(measured ECC-on, isolating n-max; ECC-off scales all rows ~+10 %.)*
+*(measured ECC-**on** to isolate n-max — that's why these sit ~10 % below the headline; ECC-off scales every row ~+10 %, e.g. n-max 2 → ~89, n-max 1 → ~83.)*
 
-**`--spec-draft-p-min` and batch size don't help either** (ECC-off code-gen sweep, confirming n-max=2≈3 is the peak):
+**`--spec-draft-p-min` and batch size don't help either.** This sweep is ECC-off but uses one **harder** code prompt (68 % MTP acceptance vs the headline code's ~80 %), so its absolutes run ~7 tok/s below the headline — the **ranking** is the point (n-max 2 ≈ 3 is the peak), not the absolute numbers:
 
 | config | tok/s | accept |
 |--------|-------|--------|
@@ -201,13 +203,13 @@ Raising `--spec-draft-p-min` above its 0.0 default makes drafting *more conserva
 Getting **every** input type over 100 is not achievable on a single L4 with this model+quant, and I proved it by implementing and measuring — not by hand-waving:
 
 1. **Raw decode ceiling ≈ 73 tok/s (ECC-off).** `llama-bench`, no speculation, full GPU residency: `tg ≈ 73 tok/s`. This is the memory-read limit for the model's ~1.7 GB of active weights per token at ~300 GB/s. (It was 65.5 with ECC on — that's what step 0 fixes.)
-2. **MTP multiplies that by only ~1.27–1.37×.** Acceptance is ~0.77 on prose (1.27× → ~93) and tops out ~0.90 on math (1.37× → ~100). Pushing chat (~0.77 → ~92) past 100 would need a sustained ~1.4×+, which the MTP head doesn't deliver on lower-predictability content.
+2. **MTP multiplies that by only ~1.27–1.37×.** Acceptance is ~0.78 on prose (1.27× → ~92) and tops out ~0.90 on math (1.35× → ~99). Pushing chat (~0.77 → ~91) past 100 would need a sustained ~1.4×+, which the MTP head doesn't deliver on lower-predictability content.
 3. **MTP decode is power-bound at 72 W.** Time-series during sustained decode: raw decode is latency-bound (~27–32 W, clock at the 2040 MHz max). MTP adds draft+verify work that pins the card at **71.6 W (≥70.5 W in 89 % of samples)** and throttles the clock to ~1845 MHz. Even the counterfactual full-clock would be only ~+10% → ~95, and 72 W is the card's hard max.
 4. **The MoE expert-union caps MTP at ~1.3×.** With 8-of-256 routing, MTP's `1+n_max` verified tokens activate *different* experts, so each speculative step pulls in a growing union of expert slices (you'd need a batch of ~94 to amortize the full set). An [independent benchmark on this exact model (RTX 3090, 3× the L4's bandwidth)](https://github.com/thc1006/qwen3.6-speculative-decoding-rtx3090) finds *all* speculative methods go net-negative — confirming the cap is architectural, not L4-specific.
-5. **A lower quant *backfires* (measured).** Q3_K_XL + ECC-off scores **MIN 86.9 tok/s — below Q4's 91.7** — because the coarser quant degrades the MTP draft head (acceptance 0.766 → 0.714), and the lost speculative speedup outweighs the smaller (16 vs 22 GiB) weight reads. So a lower quant loses on **both** quality and speed here.
+5. **A lower quant *backfires* (measured).** Q3_K_XL + ECC-off scores **MIN ~87 tok/s — below Q4's ~91** — because the coarser quant degrades the MTP draft head (acceptance 0.766 → 0.714), and the lost speculative speedup outweighs the smaller (16 vs 22 GiB) weight reads. So a lower quant loses on **both** quality and speed here.
 6. **Kernel work can't close it either.** Profiling + mining hand-written engines ([antirez/ds4](https://github.com/antirez/ds4), [MIT-HAN-Lab kernel-design-agents](https://github.com/mit-han-lab/kernel-design-agents)) showed the only lossless lever is fusing the MoE gate+up on the MTP-verify path (upstream leaves it unfused). I [implemented it](#advanced-moe-verify-fusion-patch-optional-1) and **measured +1 %** — bounded by the ~3 % per-token launch-overhead budget (measured via CUDA-graphs on/off). Megakernel approaches (Mirage etc.) don't apply: their win is cross-layer weight prefetch, but our weights are already fully VRAM-resident.
 
-**What actually reaches >100:** a higher-bandwidth GPU — L40S (~864 GB/s), RTX 6000 Ada (~960 GB/s → ~240), or A100 (~2 TB/s). Cross-check: Unsloth reports ~240 tok/s on RTX 6000; scaling by bandwidth → ~75 on L4, consistent with what we measure. **Not** a quant change and **not** a kernel rewrite. On the single L4, **~92–93 (min) is the wall** for this model.
+**What actually reaches >100:** a higher-bandwidth GPU — L40S (~864 GB/s), RTX 6000 Ada (~960 GB/s → ~240), or A100 (~2 TB/s). Cross-check: Unsloth reports ~240 tok/s on RTX 6000; scaling by bandwidth → ~75 on L4, consistent with what we measure. **Not** a quant change and **not** a kernel rewrite. On the single L4, **~91 (min, chat) to ~99 (max, math)** is the wall for this model.
 
 ---
 
@@ -220,7 +222,7 @@ Getting **every** input type over 100 is not achievable on a single L4 with this
 
 [`patches/moe-verify-fusion.patch`](patches/moe-verify-fusion.patch) is an experimental, **lossless** ggml-cuda patch that fuses the gate+up projections (and SwiGLU) of the MoE FFN on the **MTP verify path** (`MUL_MAT_ID` with `ncols_dst > 1`), which upstream runs unfused (the single-token path is already fused upstream).
 
-Measured A/B (same source build, ECC-off): **+1.0–1.1 %** (chat 82.8 → 83.6 tok/s), output bit-equivalent. A genuine but small win — bounded by the ~3 % launch-overhead budget, which is why it can't reach 100. It requires a source build (`cmake --build`), so it's *not* in the prebuilt Docker image; it's upstreamable. Apply with `patch -p1 < patches/moe-verify-fusion.patch`.
+Measured A/B on a **source build** (ECC-off, same build with vs without the patch): **+1.0–1.1 %**, output bit-equivalent (the two A/B points were 82.8 → 83.6 tok/s on that build). **Read the delta, not the absolute** — the source build runs slower than the optimized prebuilt image (that's why 82.8 is below the headline; it is *not* the deployed speed). A genuine but small win, bounded by the ~3 % launch-overhead budget — which is why it can't reach 100. Requires a source build (`cmake --build`), so it's *not* in the prebuilt Docker image; it's upstreamable. Apply with `patch -p1 < patches/moe-verify-fusion.patch`.
 
 ---
 
@@ -229,7 +231,7 @@ Measured A/B (same source build, ECC-off): **+1.0–1.1 %** (chat 82.8 → 83.6 
 The model's train context is 262 K; on a single L4 the only limit is VRAM. Binary-searched the maximum `--ctx-size` before OOM (1024-token resolution, the exact lossless config above, ECC off — only ctx varied):
 
 - **Max = 56,320 tokens** before OOM (first OOM at 57,344), at **full GPU residency** (`--n-cpu-moe 0`) — **no expert offload**. The KV cache is only **~22 KiB/token** (heavy GQA), so the ~1.5 GiB left after weights holds ~48 K tokens more than the old 8 K default — a **6.9× increase, lossless**.
-- **Speed is unaffected by the limit:** a short request decodes at **95–98 tok/s whether ctx is 8 K, 49 K, or 56 K** (the complete Döner-kebab generation ran at **98.0 tok/s at ctx = 49,152**). Decode only slows as you *actually fill* tens of thousands of tokens — that's KV-read cost, not a config penalty. So raising the limit is free for normal requests.
+- **Speed is invariant to the ctx *limit*:** the same request decodes at the same rate whether `--ctx-size` is 8 K, 49 K, or 56 K — so raising the limit is free. Decode only slows as you *actually fill* tens of thousands of tokens (more KV to read per step), not from the allocation. (The long Döner-kebab HTML generation clocked ~98 tok/s — *above* the ~91–99 headline because its repetitive canvas/JS tail has unusually high MTP acceptance; short mixed prompts sit at the headline.)
 - **ECC off is the assumed precondition.** The ~1.5 GiB freed in [step 0](#0-disable-ecc-one-time-10-lossless) is exactly what makes 56 K fit, so **`--ctx-size 56320` is the default everywhere** — [`provision-spot.sh`](scripts/provision-spot.sh) (which disables ECC for you), the prebuilt image, and [`docker-compose.yml`](docker-compose.yml). Disable ECC first; on an ECC-*on* card 56 K will OOM at load (drop `--ctx-size` to fit if you can't).
 - **Headroom is thin at the ceiling:** 56,320 sits at ~98 % VRAM (~480 MiB free). The GGUF lazy-loads a **1,134 MiB multimodal projector** on the first image request, which would OOM near the ceiling — so for text **+ vision** keep ctx well below 56 K (≤32 K is comfortable).
 
@@ -239,7 +241,7 @@ For context beyond 56 K, a near-lossless quantized KV cache (`--cache-type-k q8_
 
 ## Concurrency (parallel slots)
 
-The server runs **`--parallel 1`** by default (one slot — lowest single-stream latency). Raising `--parallel N` splits the KV cache into N slots that decode concurrently. Measured with N concurrent requests of the same Döner prompt, `cache_prompt: false` so each slot prefills **independently** — no cross-slot KV reuse (every slot in a run measured an identical rate, which confirms the work is independent and the comparison fair):
+The server runs **`--parallel 1`** by default (one slot — lowest single-stream latency). Raising `--parallel N` splits the KV cache into N slots that decode concurrently. Measured with N concurrent requests of the same Döner prompt, `cache_prompt: false` so each slot prefills **independently** — no cross-slot KV reuse (every slot in a run measured an identical rate, which confirms the work is independent and the comparison fair). This is one fixed prompt at ctx 16384 (single run), so the 1-slot baseline (86) sits just under the headline's 7-workload ~91 average — the **relative 1→10 scaling** is the point here, not the absolute:
 
 | `--parallel` | avg tok/s **per slot** | total tok/s (Σ over slots) |
 |:---:|:---:|:---:|
@@ -306,7 +308,7 @@ gcloud compute instances delete qwen36-mtp-l4-spot --zone=<zone>
 6. **Never set sampling parameters server-side.** Global `--temp`/`--top-p`/etc. perturb the draft distribution and tank MTP acceptance; pass sampling per-request.
 7. **ECC-off is the biggest single lever here** (+~10 %, lossless) — decode is memory-bound, and GDDR6 ECC taxes bandwidth. Don't over-focus on the GPU cores; the memory subsystem mattered most.
 8. **A lower quant is counter-productive** for this MTP model — Q3_K_XL measured *slower* than Q4 because it degrades the draft head. `GGML_CUDA_GRAPH_OPT=1` also slightly *hurts* on the L4 (its win scales with bandwidth the L4 lacks).
-9. **The L4 is the ceiling**: ~92–100 tok/s (min ~92) is the honest limit for Q4_K_XL + MTP on one 72 W / 300 GB/s L4. >100-on-everything needs a faster GPU.
+9. **The L4 is the ceiling**: ~91–99 tok/s (min ~91 chat, max ~99 math) is the honest limit for Q4_K_XL + MTP on one 72 W / 300 GB/s L4. >100-on-everything needs a faster GPU.
 10. **GCE reboots can drop the NVIDIA driver** (kernel auto-upgrades, prebuilt module lags). Fix: `sudo apt-get install -y nvidia-dkms-570-server-open && sudo modprobe nvidia`.
 
 ## Cost
