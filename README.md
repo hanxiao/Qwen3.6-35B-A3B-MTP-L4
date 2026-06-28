@@ -28,7 +28,6 @@ That's **~+45 % over the out-of-the-box config (63 tok/s)** — same model, same
 - GPU: **NVIDIA L4 24 GB** (Ada `sm_89`), ~300 GB/s memory bandwidth, 72 W TDP.
 - Instance type: **[`g2-standard-8`](https://cloud.google.com/compute/docs/general-purpose-machines#g2_machine_types)** (8 vCPU, 32 GB RAM, 1× L4) — the **minimum for this config**. The `--no-mmap` weight load needs ≥ ~24 GB host RAM, so the smaller `g2-standard-4` (4 vCPU, 16 GB) won't fit it without dropping `--no-mmap` (and `--threads 8` assumes 8 vCPUs). L4 is offered on the [G2 machine series](https://cloud.google.com/compute/docs/gpus#l4-gpus).
 - OS: Ubuntu 22.04 Deep Learning VM (`common-cu129-ubuntu-2204-nvidia-580` — ships the NVIDIA driver + CUDA + nvidia-container-toolkit). **Docker itself is *not* preinstalled on this CUDA base image**, so [`provision-spot.sh`](scripts/provision-spot.sh) runs `apt-get install -y docker.io && nvidia-ctk runtime configure --runtime=docker` at boot; do the same for a manual install (see step 2).
-- Reference instance: `qwen36-mtp-l4`, project `jinaai-dev`, zone `us-west1-a` (on-demand / non-spot).
 
 ## Model
 
@@ -38,11 +37,21 @@ That's **~+45 % over the out-of-the-box config (63 tok/s)** — same model, same
 
 ---
 
-## Quick start (Docker)
+## Quick start
 
-No source build needed. The official `ghcr.io/ggml-org/llama.cpp:server-cuda` image runs MTP out of the box with `--gpus all` (verified mid-2026; the tag tracks latest master).
+**One command provisions everything.** [`scripts/provision-spot.sh`](scripts/provision-spot.sh) brings up a **spot** L4 (`g2-standard-8`, ~$0.24/hr), disables ECC, fetches the model, starts the server with the optimized config + **Web UI + Prometheus telemetry**, opens the firewall, and **blocks until ready** — then prints the live URLs. It uses your active `gcloud` project/auth (no creds in the script).
 
-> **One-command spot provision:** [`scripts/provision-spot.sh`](scripts/provision-spot.sh) provisions a **spot** L4 (`g2-standard-8`, ~$0.24/hr), disables ECC, downloads the model, starts the server with **Web UI + telemetry**, opens the firewall, and **blocks until ready** — printing the live URLs. It uses your active `gcloud` project/auth (no creds in the script). Steps 0–4 below are the manual equivalent.
+```bash
+bash scripts/provision-spot.sh
+```
+
+Cold start is **~2 min** when the model is GCS-staged and the tooling image is built (both auto-detected — see [Cold start](#cold-start-provisioning)); in a fresh project it transparently falls back to a HuggingFace download + the stock base image (~10 min). Then open the printed `http://<ip>:8080` (Web UI) and `http://<ip>:8080/metrics` (Prometheus).
+
+> The firewall opens `:8080` to `0.0.0.0/0` for demo convenience — restrict `--source-ranges` to your IP for anything beyond a demo.
+
+### Manual setup (an existing box, or no GCP)
+
+No source build needed — the official `ghcr.io/ggml-org/llama.cpp:server-cuda` image runs MTP out of the box with `--gpus all` (the tag tracks latest master).
 
 ### 0. Disable ECC (one-time, +~10 %, lossless)
 
@@ -60,7 +69,7 @@ nvidia-smi --query-gpu=ecc.mode.current,memory.total --format=csv,noheader   # -
 ```bash
 mkdir -p ~/models
 pip install -q -U "huggingface_hub[hf_xet]"
-~/.local/bin/hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF \
+hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF \
   Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
   --local-dir ~/models/Qwen3.6-35B-A3B-MTP-GGUF
 ```
@@ -247,8 +256,8 @@ curl -s http://localhost:8080/v1/chat/completions -H 'Content-Type: application/
   -d '{"messages":[{"role":"user","content":"Write a Python LRU cache."}],"max_tokens":256,"temperature":0,"cache_prompt":false}' \
   | python3 -c "import sys,json;t=json.load(sys.stdin)['timings'];print(f\"{t['predicted_per_second']:.1f} tok/s\")"
 
-# stop the instance to save cost
-gcloud compute instances stop qwen36-mtp-l4 --project=jinaai-dev --zone=us-west1-a
+# delete to save cost (provision-spot.sh prints stop/delete with the live zone)
+gcloud compute instances delete qwen36-mtp-l4-spot --zone=<zone>
 ```
 
 ## Lessons learned
