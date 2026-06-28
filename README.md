@@ -237,6 +237,27 @@ For context beyond 56 K, a near-lossless quantized KV cache (`--cache-type-k q8_
 
 ---
 
+## Concurrency (parallel slots)
+
+The server runs **`--parallel 1`** by default (one slot — lowest single-stream latency). Raising `--parallel N` splits the KV cache into N slots that decode concurrently. Measured with N concurrent requests of the same Döner prompt, `cache_prompt: false` so each slot prefills **independently** — no cross-slot KV reuse (every slot in a run measured an identical rate, which confirms the work is independent and the comparison fair):
+
+| `--parallel` | avg tok/s **per slot** | total tok/s (Σ over slots) |
+|:---:|:---:|:---:|
+| **1** | **86.0** | 86.0 |
+| 2 | 41.0 | 82.0 |
+| 3 | 28.9 | 86.8 |
+| 4 | 22.1 | 88.3 |
+| 5 | 17.9 | 89.6 |
+| 6 | 15.0 | 90.3 |
+| 7 | 12.9 | 90.5 |
+| 8 | 11.4 | 91.2 |
+| 9 | 10.1 | 91.2 |
+| **10** | 9.1 | **91.3** |
+
+Per-slot throughput is highest at **1 slot (86.0 tok/s)**; aggregate peaks at **10 slots (91.3 tok/s)** — but that's only **~6 % over single-slot**. The flatness is the memory-bandwidth wall again: decode is bottlenecked on reading the MoE expert weights from VRAM, which *all slots share*, so concurrency mostly trades per-request latency for near-zero aggregate gain (unlike a compute-bound model, where batching scales). **Keep `--parallel 1` for fastest single-stream**; raise it only to serve more simultaneous users at proportionally lower per-user speed. (Sweep used ctx 16384 to leave VRAM for the parallel compute buffers; per-slot rate is ctx-independent.)
+
+---
+
 ## Cold start (provisioning)
 
 `provision-spot.sh` is tuned to reach a healthy endpoint fast. The 22 GB GGUF is staged once in a **same-region GCS bucket** ([`scripts/stage-model-gcs.sh`](scripts/stage-model-gcs.sh)) and pulled with a sliced parallel download instead of from HuggingFace; the docker install, image pull, and model fetch run **concurrently**; the boot disk is **pd-ssd**; and the server starts with `--no-warmup`.
