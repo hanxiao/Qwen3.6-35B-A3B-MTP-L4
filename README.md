@@ -181,6 +181,19 @@ n-max=2 is the sweet spot — higher values verify more draft tokens but accepta
 
 *(measured ECC-on, isolating n-max; ECC-off scales all rows ~+10 %.)*
 
+**`--spec-draft-p-min` and batch size don't help either** (ECC-off code-gen sweep, confirming n-max=2≈3 is the peak):
+
+| config | tok/s | accept |
+|--------|-------|--------|
+| n-max 2, p-min 0 (default) | **85.6** | 68 % |
+| n-max 3, p-min 0 | 85.5 | 61 % |
+| n-max 4, p-min 0.5 | 74.3 | 76 % |
+| n-max 4, p-min 0.8 | 68.0 | 96 % |
+| n-max 8, p-min 0.7 | 70.2 | 92 % |
+| n-max 2, `-ub 256 -b 1024` | 84.6 | 68 % |
+
+Raising `--spec-draft-p-min` above its 0.0 default makes drafting *more conservative* — acceptance climbs (96 % at p-min 0.8) but throughput **falls**, because far fewer speculative tokens are attempted. And `-ub 256` matches `-ub 64` (decode is batch-1, so `-ub`/`-b` are prefill/VRAM knobs, not decode levers). The current `n-max 2, p-min 0, -ub 64` is already the peak; **none of `--batch-size`/`--ubatch-size`/`--spec-draft-n-max`/`--spec-draft-p-min` buys decode throughput** — that needs a higher-bandwidth GPU (see [Why not 100](#why-not-100-toks)).
+
 ---
 
 ## Why not 100 tok/s
