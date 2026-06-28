@@ -256,6 +256,8 @@ The server runs **`--parallel 1`** by default (one slot — lowest single-stream
 
 Per-slot throughput is highest at **1 slot (86.0 tok/s)**; aggregate peaks at **10 slots (91.3 tok/s)** — but that's only **~6 % over single-slot**. The flatness is the memory-bandwidth wall again: decode is bottlenecked on reading the MoE expert weights from VRAM, which *all slots share*, so concurrency mostly trades per-request latency for near-zero aggregate gain (unlike a compute-bound model, where batching scales). **Keep `--parallel 1` for fastest single-stream**; raise it only to serve more simultaneous users at proportionally lower per-user speed. (Sweep used ctx 16384 to leave VRAM for the parallel compute buffers; per-slot rate is ctx-independent.)
 
+**Max context shrinks sharply with slots.** Each slot needs its own MTP draft context and the batched compute buffers grow, so the max `--ctx-size` before OOM drops from 56,320 at 1 slot to **25,600 at `--parallel 10`** (2,560 tokens/slot; 25,856 OOMs at load). Binary-searched and verified stable under 10 concurrent generations at 98 % VRAM (24,076/24,570 MiB). Budget `ctx-size ≈ slots × per-slot-need`, well under the single-slot ceiling.
+
 ---
 
 ## Cold start (provisioning)
