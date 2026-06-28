@@ -50,6 +50,21 @@ All within run-noise (~±1.5 tok/s). **Net free-lever gain ≈ 0.**
 **Papers:** FastMTP 2509.18362 · DFlash 2602.06036 · Apple tree-MTP 2507.11851 · EAGLE 2401.15077 / -2 2406.16858 / -3 2503.01840 · Medusa 2401.10774 · SpecExec 2406.02532 · Lookahead 2402.02057 · CLLM 2403.00835 · MoE-Spec 2602.16052 · FlashInfer 2501.01005.
 **Benchmarks:** jarvislabs (llama.cpp Qwen3.6-MTP 193→225 tok/s = 1.17× on RTX PRO 6000 — confirms bandwidth scaling); kaitchup DFlash-vs-MTP (Q4 llama.cpp faster at bs=1); unsloth GGUF discussion #14; NVIDIA "Optimizing llama.cpp with CUDA Graphs"; L4 datasheet (72 W / 300 GB/s).
 
+## Software stack version (driver / CUDA-nvcc / GCP image / build) — also ~0
+
+Checked whether a different driver, CUDA toolkit, GCP DLVM image, NGC container, or compile config gives a marginal speedup (searched NVIDIA/GCP docs + release notes, inspected the live box, and rebuilt from source):
+
+| Stack lever | Finding | Gain |
+|-------------|---------|------|
+| GCP DLVM image | `cu129-…-nvidia-580` is the **newest** family; no cu13x / nvidia-590 DLVM exists | 0 |
+| NVIDIA driver | **580.159.03** is the newest GCP-blessed branch; R580/R590 release notes have **no Ada/L4 decode or clock/power changes**; the driver doesn't gate ggml codegen (the container's CUDA runtime does) | 0 |
+| Prebuilt image compile | `libggml-cuda.so` already ships **native sm_89 SASS** (cuobjdump: sm_86/sm_89/sm_120, no PTX-JIT), built with CUDA 12.8 | already-optimal |
+| **CUDA 12.8 vs 12.9 build** (measured A/B, raw decode) | **70.1 vs 70.0 tok/s — identical**; newer nvcc produces no faster DP4A/MMVQ codegen for sm_89 | **0** |
+| Clocks / power | memory clock **hard-fixed at 6251 MHz** (one state — can't overclock the 300 GB/s); power **hard-capped at 72 W** (`-pl 80` rejected; locked 2040 MHz collapses to 1950) | 0 |
+| NGC / NVIDIA container | no NVIDIA-built llama.cpp image exists (NGC ships TRT-LLM/NIM/Triton — different engine, Ada-blocked for this model) | n/a |
+
+So no version/build/driver/image change helps — you are already on the newest, optimally-compiled stack, and the walls are hardware.
+
 ## Verdict
 
 The ~91–99 tok/s in the headline **is** the lossless ceiling for this model on one L4 — confirmed by exhausting all 16 levers (12 dead-ends proven by reading code, the rest measured at ~0). To go past 120: **change the silicon** (L40S/A100/H100-class bandwidth). That is the only thing that moves the 300 GB/s wall, consistent with every measurement here and the 225 tok/s others get on a 3× faster card.
