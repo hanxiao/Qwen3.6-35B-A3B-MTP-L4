@@ -80,6 +80,30 @@ A second deep search (r/LocalLLaMA, deep GitHub issues/PRs/forks, NVIDIA forums,
 
 **Honest note:** the community DOES have big numbers for this model (110–157 tok/s on ik), but every one is built on `iq4_xs`/`q4_0`-KV — a *different quantization*, which violates the lossless/same-weights constraint and would be cheating against the goal. On the **same Q4_K_XL weights + f16 KV**, mainline llama.cpp is already at/above every community alternative.
 
+## Lower-bit quant: IQ4_XS — measured speed AND quality (the only lever that moves, marginally)
+
+The official `Qwen3.6-35B-A3B-UD-IQ4_XS.gguf` (**17.0 GB** vs Q4_K_XL's 21.3 GB — ~20% smaller) reads fewer bytes/token, so it's faster on the bandwidth-bound L4 — but it's a **lower-bit quant**, so it costs quality. Both measured on the same box (mainline llama.cpp, MTP n=2, ECC off, 7-workload `bench.sh`, 256 tok, greedy):
+
+| Workload | Q4_K_XL | IQ4_XS | Δ |
+|----------|---------|--------|---|
+| chat (min) | 91.1 | 92.4 | +1.4% |
+| prose | 92.7 | 94.7 | +2.1% |
+| code | 93.5 | 95.7 | +2.4% |
+| json | 92.5 | 94.9 | +2.6% |
+| multi | 91.9 | 94.2 | +2.5% |
+| math | 99.0 | 102.0 | +3.0% |
+| summ | 93.1 | 100.8 | +8.3% |
+| **avg** | **93.4** | **96.4** | **+3.2%** |
+
+Quality (wikitext-2 perplexity, `llama-perplexity`, 40 chunks, lower=better):
+
+| Quant | PPL | size |
+|-------|-----|------|
+| Q4_K_XL | **5.8263** ± 0.138 | 21.3 GB |
+| IQ4_XS  | **5.9363** ± 0.142 | 17.0 GB |
+
+**IQ4_XS = ~+3 % average speed (min +1.4 %) for ~+1.9 % higher perplexity** — a near-wash, *not* lossless, and still min 92.4 / max 102 — **nowhere near 120**. (mainline beats ik on IQ4_XS too: mainline 95/100/101 vs ik 89/93/101.) Notes: a short-prompt sweep teased +7–15 %, but that was prompt/acceptance noise — the 7-workload bench is the honest figure. The community's 110–157 tok/s for this model stack IQ4_XS **+ quantized KV (q4_0/q5_0) + ik**, i.e. *more* quality cuts on top — which is why they go faster and why it's not lossless. Not adopted as the repo default (keeps the lossless Q4_K_XL guarantee); IQ4_XS is available as a "slightly faster, slightly lower-quality" option for anyone who wants it.
+
 ## Verdict
 
 The ~91–99 tok/s in the headline **is** the lossless ceiling for this model on one L4 — confirmed by exhausting all 16 levers (12 dead-ends proven by reading code, the rest measured at ~0). To go past 120: **change the silicon** (L40S/A100/H100-class bandwidth). That is the only thing that moves the 300 GB/s wall, consistent with every measurement here and the 225 tok/s others get on a 3× faster card.
